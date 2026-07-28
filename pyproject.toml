@@ -1,0 +1,172 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ipo-know"
+version = "0.1.0"
+description = "IPO Know - 上交所IPO信息披露数据采集与分析平台"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.18.5",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "pyyaml>=6.0.3",
+    "requests>=2.34.2",
+    "sqlalchemy>=2.0.51",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.1",
+    "ruff>=0.16.0",
+]
+
+# ==================== Ruff 代码检查与格式化配置 ====================
+[tool.ruff]
+# 目标 Python 版本，匹配规范中 str | None 等现代语法
+target-version = "py310"
+# 最大行宽 80 字符，同时作用于 lint 与 format，对应规范 3.2 节
+line-length = 80
+# 4 空格缩进宽度，顶层配置，同时被格式化器与行宽计算共用
+indent-width = 4
+
+[tool.ruff.format]
+# 缩进使用空格而非 Tab，对应 3.4 节要求
+indent-style = "space"
+# 统一单引号风格，对应 3.10 节「文件内引号风格统一」要求
+quote-style = "single"
+# 保留尾随逗号作为换行信号，对应 3.4.1 节尾随逗号规范
+skip-magic-trailing-comma = false
+# 自动适配系统换行符
+line-ending = "auto"
+
+[tool.ruff.lint]
+# 启用的规则集，逐项对应 Google 规范要求
+select = [
+  "E",      # pycodestyle 格式错误（分号、行宽、同行多语句等基础规范）
+  "F",      # pyflakes 逻辑错误（未使用变量、冗余导入等）
+  "B",      # flake8-bugbear（可变默认参数、过宽异常捕获等常见bug）
+  "UP",     # pyupgrade（现代语法升级，匹配 | 联合类型等规范）
+  "RUF",    # Ruff 内置规则（冗余 noqa、无用代码、忽略语法规范）
+  "I",      # isort 导入排序与格式校验
+  "N",      # pep8-naming 命名规范校验
+  "D",      # pydocstyle 文档字符串规范
+  "ARG",    # flake8-unused-arguments 未使用参数检测
+  "G",      # flake8-logging-format 日志延迟格式化规范
+  "TID",    # flake8-tidy-imports 导入约束（禁止相对导入）
+  "ANN",    # flake8-annotations 类型注解强制（公共API必须加注解）
+  "C4",     # flake8-comprehensions 推导式与迭代器最佳实践
+  "SIM",    # flake8-simplify 代码简化（含 with 资源管理推荐）
+  "TD",     # flake8-todos TODO 注释格式校验（含冒号要求 TD004）
+]
+# 收紧哑变量规则：仅纯下划线 _ 视为未使用变量豁免，_var 前缀不豁免
+# 匹配规范「不推荐下划线前缀」的导向，鼓励用 del 方式处理
+dummy-variable-rgx = "^_$"
+
+[tool.ruff.lint.isort]
+# 全局强制：每行一个导入符号（规范默认要求）
+force-single-line = true
+# 导入排序忽略大小写，按字典序排列，对应 3.13 节要求
+case-sensitive = false
+# 导入块后保留 2 个空行，匹配顶层定义间的空行规范
+lines-after-imports = 2
+
+[tool.ruff.lint.flake8-tidy-imports]
+# 禁止所有层级的相对导入，对应 2.2、2.3 节要求
+ban-relative-imports = "all"
+
+[tool.ruff.lint.pydocstyle]
+# 严格遵循 Google 风格文档字符串，对应 3.8 节要求
+convention = "google"
+# 被 @override 装饰的方法无需 docstring，对应 3.8.3.1 节重写方法规则
+ignore-decorators = ["override"]
+
+# ==================== Alembic 迁移脚本配置 ====================
+[tool.alembic]
+
+# path to migration scripts.
+# this is typically a path given in POSIX (e.g. forward slashes)
+# format, relative to the token %(here)s which refers to the location of this
+# ini file
+script_location = "%(here)s/alembic"
+
+# template used to generate migration file names; The default value is %%(rev)s_%%(slug)s
+# Uncomment the line below if you want the files to be prepended with date and time
+# see https://alembic.sqlalchemy.org/en/latest/tutorial.html#editing-the-ini-file
+# for all available tokens
+# file_template = "%%(year)d_%%(month).2d_%%(day).2d_%%(hour).2d%%(minute).2d-%%(rev)s_%%(slug)s"
+# Or organize into date-based subdirectories (requires recursive_version_locations = true)
+# file_template = "%%(year)d/%%(month).2d/%%(day).2d_%%(hour).2d%%(minute).2d_%%(second).2d_%%(rev)s_%%(slug)s"
+
+# additional paths to be prepended to sys.path. defaults to the current working directory.
+prepend_sys_path = [
+    "./src"
+]
+
+# timezone to use when rendering the date within the migration file
+# as well as the filename.
+# If specified, requires the tzdata library which can be installed by adding
+# `alembic[tz]` to the pip requirements.
+# string value is passed to ZoneInfo()
+# leave blank for localtime
+# timezone =
+
+# max length of characters to apply to the "slug" field
+# truncate_slug_length = 40
+
+# set to 'true' to run the environment during
+# the 'revision' command, regardless of autogenerate
+# revision_environment = false
+
+# set to 'true' to allow .pyc and .pyo files without
+# a source .py file to be detected as revisions in the
+# versions/ directory
+# sourceless = false
+
+# version location specification; This defaults
+# to <script_location>/versions.  When using multiple version
+# directories, initial revisions must be specified with --version-path.
+# version_locations = [
+#    "%(here)s/alembic/versions",
+#    "%(here)s/foo/bar"
+# ]
+
+
+# set to 'true' to search source files recursively
+# in each "version_locations" directory
+# new in Alembic version 1.10
+# recursive_version_locations = false
+
+# the output encoding used when revision files
+# are written from script.py.mako
+# output_encoding = "utf-8"
+
+# This section defines scripts or Python functions that are run
+# on newly generated revision scripts.  See the documentation for further
+# detail and examples
+# [[tool.alembic.post_write_hooks]]
+# format using "black" - use the console_scripts runner,
+# against the "black" entrypoint
+# name = "black"
+# type = "console_scripts"
+# entrypoint = "black"
+# options = "-l 79 REVISION_SCRIPT_FILENAME"
+#
+# [[tool.alembic.post_write_hooks]]
+# lint with attempts to fix using "ruff" - use the module runner, against the "ruff" module
+# name = "ruff"
+# type = "module"
+# module = "ruff"
+# options = "check --fix REVISION_SCRIPT_FILENAME"
+#
+# [[tool.alembic.post_write_hooks]]
+# Alternatively, use the exec runner to execute a binary found on your PATH
+# name = "ruff"
+# type = "exec"
+# executable = "ruff"
+# options = "check --fix REVISION_SCRIPT_FILENAME"
+

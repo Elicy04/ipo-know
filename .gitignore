@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Cache
+download_cache/
+output/
+tmp/
+
+# Environment
+.env
+
+# System
+.DS_Store
+Thumbs.db
