@@ -1,13 +1,19 @@
-# alembic/env.py
+"""Alembic 迁移环境配置."""
+
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool, event
+
+from sqlalchemy import engine_from_config
+from sqlalchemy import event
+from sqlalchemy import pool
+
 from alembic import context
 
 # 1. 导入统一配置与模型元数据
 from ipo_know.config.config import settings
 from ipo_know.storage import Base
 
-# 2. 初始化配置，统一注入真实数据库URL（唯一真值源）
+
+# 2. 初始化配置, 统一注入真实数据库URL(唯一真值源)
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
@@ -19,7 +25,7 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    """离线模式：生成纯SQL脚本，不连接数据库"""
+    """离线模式: 生成纯SQL脚本, 不连接数据库."""
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
@@ -34,8 +40,8 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """在线模式：直接连接数据库执行迁移"""
-    # 独立创建迁移专用引擎，与业务引擎隔离
+    """在线模式: 直接连接数据库执行迁移."""
+    # 独立创建迁移专用引擎, 与业务引擎隔离
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -44,9 +50,9 @@ def run_migrations_online() -> None:
         connect_args={"check_same_thread": False},
     )
 
-    # SQLite 连接级配置：开启外键约束
+    # SQLite 连接级配置: 开启外键约束
     @event.listens_for(connectable, "connect")
-    def _enable_sqlite_foreign_keys(dbapi_connection, _):
+    def _enable_sqlite_foreign_keys(dbapi_connection, _) -> None:   # noqa: ANN001
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys = ON")
         cursor.close()
