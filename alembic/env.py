@@ -15,7 +15,9 @@ from ipo_know.storage import Base
 
 # 2. 初始化配置, 统一注入真实数据库URL(唯一真值源)
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option(
+    "sqlalchemy.url", settings.database.database_url,
+)
 
 # 加载日志配置
 if config.config_file_name is not None:

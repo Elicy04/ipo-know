@@ -13,7 +13,7 @@ from ipo_know.config import config
 
 
 engine = sqlalchemy.create_engine(
-    config.settings.database_url,
+    config.settings.database.database_url,
     connect_args={"check_same_thread": False},
 )
 
