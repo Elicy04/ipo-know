@@ -1,6 +1,9 @@
-from importlib import import_module
-from pathlib import Path
+"""Models 子包, 自动发现并加载所有数据表模型模块."""
 
-for p in Path(__path__[0]).glob("*.py"):
+import importlib
+import pathlib
+
+
+for p in pathlib.Path(__path__[0]).glob("*.py"):
     if p.stem != "__init__":
-        import_module(f".{p.stem}", __name__)
+        importlib.import_module(f".{p.stem}", __name__)

@@ -1,6 +1,11 @@
-from .models.base_model import Base
-from .session import engine, SessionLocal
-# 关键：导入models包，触发内部所有模型加载
-from .models import *
+"""Storage 包, 提供数据库连接、会话工厂和 ORM 模型基类."""
 
-__all__ = ["Base", "engine", "SessionLocal"]
+import ipo_know.storage.models as _models
+import ipo_know.storage.session as _session
+
+
+Base = _models.base_model.Base
+SessionLocal = _session.SessionLocal
+engine = _session.engine
+
+__all__ = ["Base", "SessionLocal", "engine"]
