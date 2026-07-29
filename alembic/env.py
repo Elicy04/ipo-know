@@ -5,7 +5,7 @@ from alembic import context
 
 # 1. 导入统一配置与模型元数据
 from ipo_know.config.config import settings
-from ipo_know.storeage import Base
+from ipo_know.storage import Base
 
 # 2. 初始化配置，统一注入真实数据库URL（唯一真值源）
 config = context.config
