@@ -66,8 +66,12 @@ P.S. git branch -D <分支名> 会强制删除分支，不提示确认。
 **流程具体命令演示(在克隆到本地后)**：
 在uv环境终端：
 1. 新分支创建：有新业务需求，拉取最新main分支代码，基于main分支新建分支。
-`git pull main`
-`git switch -c feat/<new-feature-name>`
+    1.1 确保当前在主干，并拉取最新代码
+    `git switch main`
+    `git pull origin main`
+
+    2.2 再从干净的主干创建新分支
+    `git switch -c feature/B`
 2. 开发：先严格同步uv环境，然后在分支上进行开发提交。
 `uv sync --frozen`
 
