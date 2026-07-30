@@ -148,8 +148,8 @@ class BaseHttpClient:
         logger.debug('HTTP 客户端关闭')
         self._client.close()
 
-    def __enter__(self) -> 'BaseHttpClient':  # noqa: D105, RUF003  # 标准 context manager 协议，行为自明
+    def __enter__(self) -> 'BaseHttpClient':  # noqa: D105  # 标准 context manager 协议，行为自明
         return self
 
-    def __exit__(self, *args: object) -> None:  # noqa: D105, RUF003  # 标准 context manager 协议，行为自明
+    def __exit__(self, *args: object) -> None:  # noqa: D105  # 标准 context manager 协议，行为自明
         self.close()
