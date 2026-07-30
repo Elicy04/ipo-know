@@ -9,6 +9,7 @@ description = "IPO Know - 上交所IPO信息披露数据采集与分析平台"
 requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.18.5",
+    "loguru>=0.7.3",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.3",
