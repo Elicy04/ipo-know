@@ -1,0 +1,58 @@
+# 接口：IPO项目披露文件列表查询
+api_meta:
+  api_id: "sse_ipo_files_list_query"
+  api_name: "上交所IPO披露文件列表"
+  description: "按审核ID查询项目对应的全部披露文件清单"
+  endpoint: "/commonSoaQuery.do"
+  method: "GET"
+  sql_id: "GP_COMMON_FILE_SEARCH"
+
+# 查询参数定义
+query_params:
+  # 固定系统参数
+  - name: "sqlId"
+    type: "string"
+    required: true
+    default: "GP_COMMON_FILE_SEARCH"
+    description: "后端SQL查询标识"
+  - name: "jsonCallBack"
+    type: "string"
+    required: true
+    description: "JSONP回调函数名，运行时动态生成"
+    dynamic: true
+  - name: "isPagination"
+    type: "boolean"
+    required: true
+    default: false
+    description: "是否启用分页，默认关闭返回全量"
+  - name: "_"
+    type: "integer"
+    required: true
+    description: "时间戳防缓存参数，运行时动态生成"
+    dynamic: true
+
+  # 业务查询参数
+  - name: "auditId"
+    type: "string"
+    required: true
+    description: "项目审核ID（来自项目详情/列表）"
+  - name: "marketType"
+    type: "string"
+    required: false
+    default: "1,2"
+    description: "市场类型：1=科创板，2=主板"
+
+# 请求头配置
+headers:
+  inherit_global: true
+  extra: {}
+
+# 响应配置
+response:
+  format: "jsonp"
+  data_list_path: "pageHelp.data"
+  total_field_path: "pageHelp.total"
+  response_model: "SSEFileListResponse"
+  item_model: "FileItem"
+  # 文件下载基础域名
+  file_base_url: "https://static.sse.com.cn"

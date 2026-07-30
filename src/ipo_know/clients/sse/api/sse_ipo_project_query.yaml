@@ -1,0 +1,79 @@
+# ==================================================
+# 上交所IPO项目通用查询接口（列表/详情复用同一后端服务）
+# 能力说明：同一 endpoint + sqlId 通过参数组合实现两种查询模式
+# stockAuditNum 留空/传入 → 全量查询/按项目审核编号查询单条详情(返回列表长度为1)
+# ==================================================
+api_meta:
+  api_id: "sse_ipo_project_query"
+  api_name: "上交所IPO项目通用查询"
+  description: "上交所IPO审核项目通用查询接口"
+  endpoint: "/commonSoaQuery.do"
+  method: "GET"
+  sql_id: "SH_XM_LB"
+
+# 查询参数定义
+query_params:
+  # ========== 固定系统参数（两种模式均必填） ==========
+  - name: "sqlId"
+    type: "string"
+    required: true
+    default: "SH_XM_LB"
+    description: "后端SQL查询标识，固定值不可修改"
+  - name: "jsonCallBack"
+    type: "string"
+    required: true
+    description: "JSONP回调函数名，运行时动态生成随机字符串"
+    dynamic: true
+  - name: "isPagination"
+    type: "boolean"
+    required: true
+    default: false
+    description: "是否启用分页，列表/详情模式均建议保持开启"
+  - name: "_"
+    type: "integer"
+    required: true
+    description: "毫秒级时间戳防缓存参数，运行时动态生成"
+    dynamic: true
+
+  # ========== 业务查询参数 ==========
+  - name: "csrcCode"
+    type: "string"
+    required: false
+    description: "证监会行业代码（如 C36=汽车制造业）。"
+  - name: "stockAuditNum"
+    type: "string"
+    required: false
+    description: "项目审核编号（列表接口返回字段）。"
+  - name: "issueMarketType"
+    type: "string"
+    required: false
+    default: "1,2"
+    description: "上市板块筛选：1=科创板，2=主板，支持逗号分隔多选"
+
+  # ========== 分页参数（仅列表模式生效） ==========
+  - name: "pageSize"
+    type: "integer"
+    required: false
+    default: 100
+    description: "每页返回条数，接口最大支持100条；"
+  - name: "pageNo"
+    type: "integer"
+    required: false
+    default: 1
+    description: "页码，从1开始；"
+
+# 请求头配置
+headers:
+  inherit_global: true
+  extra: {}
+
+# 响应配置
+response:
+  format: "jsonp"
+  data_list_path: "pageHelp.data"
+  total_field_path: "pageHelp.total"
+  response_model: "SSEIPOQueryResponse"
+  item_model: "IPOProjectItem"
+  mode_remark: |
+    列表模式：pageHelp.data 返回对应分页的项目列表，total 为筛选条件下总项目数
+    详情模式：pageHelp.data 返回长度为1的数组，total = 1
