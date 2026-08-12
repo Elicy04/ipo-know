@@ -22,7 +22,7 @@ class DatabaseConfig(pydantic.BaseModel):
         database_path: 数据库文件路径, 留空则自动计算.
     """
 
-    app_name: str = "ipo_know"
+    app_name: str = 'ipo_know'
     database_path: str | None = None
 
     @pydantic.computed_field
@@ -30,20 +30,20 @@ class DatabaseConfig(pydantic.BaseModel):
     def database_url(self) -> str:
         """统一的 SQLite 连接 URL, 业务代码与 Alembic 共同使用."""
         db_path = self._resolve_db_path()
-        db_path_str = str(db_path).replace("\\", "/")
-        return f"sqlite:///{db_path_str}"
+        db_path_str = str(db_path).replace('\\', '/')
+        return f'sqlite:///{db_path_str}'
 
     def _resolve_db_path(self) -> pathlib.Path:
         """解析数据库文件真实路径, 自动创建父目录."""
         if self.database_path:
             db_path = pathlib.Path(self.database_path)
         else:
-            app_data_root = os.getenv("LOCALAPPDATA")
+            app_data_root = os.getenv('LOCALAPPDATA')
             if app_data_root:
                 base_dir = pathlib.Path(app_data_root) / self.app_name
             else:
-                base_dir = pathlib.Path.home() / f".{self.app_name}"
-            db_path = base_dir / "database" / f"{self.app_name}.db"
+                base_dir = pathlib.Path.home() / f'.{self.app_name}'
+            db_path = base_dir / 'database' / f'{self.app_name}.db'
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return db_path
@@ -67,11 +67,11 @@ class SSESettings(pydantic.BaseModel):
         config_dir: API yaml 配置文件所在目录, 留空由 client 自动解析.
     """
 
-    query_base_url: str = "https://query.sse.com.cn"
-    static_base_url: str = "https://static.sse.com.cn"
-    www_base_url: str = "https://www.sse.com.cn"
+    query_base_url: str = 'https://query.sse.com.cn'
+    static_base_url: str = 'https://static.sse.com.cn'
+    www_base_url: str = 'https://www.sse.com.cn'
     timeout: int = 10
-    config_dir: str = ""
+    config_dir: str = ''
 
 
 class Settings(pydantic_settings.BaseSettings):
@@ -97,10 +97,10 @@ class Settings(pydantic_settings.BaseSettings):
     """
 
     model_config = pydantic_settings.SettingsConfigDict(
-        env_file=".env",
-        env_prefix="IPO_KNOW_",
+        env_file='.env',
+        env_prefix='IPO_KNOW_',
         case_sensitive=False,
-        env_nested_delimiter="__",
+        env_nested_delimiter='__',
     )
 
     database: DatabaseConfig = pydantic.Field(
@@ -110,8 +110,8 @@ class Settings(pydantic_settings.BaseSettings):
         default_factory=SSESettings,
     )
     deepseek_api_key: str = pydantic.Field(
-        default="",
-        description="DeepSeek API 密钥, 对应环境变量 IPO_KNOW_DEEPSEEK_API_KEY",
+        default='',
+        description='DeepSeek API 密钥, 对应环境变量 IPO_KNOW_DEEPSEEK_API_KEY',
     )
 
 
