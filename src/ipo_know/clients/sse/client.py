@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from ipo_know.clients.http_client import BaseHttpClient
 from ipo_know.clients.sse.loader import ApiConfig
 from ipo_know.clients.sse.loader import ConfigLoader
+from ipo_know.clients.sse.models import IPOProjectItem
 from ipo_know.clients.sse.models import SSEFileListResponse
 from ipo_know.clients.sse.models import SSEIPOQueryResponse
 from ipo_know.config.config import settings
@@ -41,6 +42,15 @@ class SSEClient(BaseHttpClient):
 
     # JSONP 响应解析正则: 匹配 回调名(...) 格式
     _JSONP_REGEX = re.compile(r'^[a-zA-Z0-9_]+\((.*)\)\s*;?\s*$', re.DOTALL)
+
+    # 【重要】项目查询接口的审核状态分桶取值.
+    # 不传 currStatus 时后端只返回在审项目, 全量口径必须逐桶
+    # 查询后合并, 详见 query_projects_all_status.
+    PROJECT_STATUS_BUCKETS: tuple[str, ...] = (
+        '2',  # 在审: 已受理/已问询/上市委审议/提交注册等
+        '5',  # 注册结果: 注册生效等
+        '8',  # 终止: 终止审核/撤回等
+    )
 
     def __init__(
         self,
@@ -293,6 +303,7 @@ class SSEClient(BaseHttpClient):
         csrc_code: str | None = None,
         stock_audit_num: str | None = None,
         issue_market_type: str = '1,2',
+        curr_status: str | None = None,
         is_pagination: bool = False,
         page_no: int = 1,
         page_size: int = 100,
@@ -301,10 +312,17 @@ class SSEClient(BaseHttpClient):
 
         支持多条件自由组合, 所有筛选参数均为可选.
 
+        【重要】curr_status 不传时后端只返回在审状态项目
+        (已受理/已问询/上市委审议/提交注册等), 注册生效、终止等
+        历史项目会被静默过滤; 全量口径请用
+        query_projects_all_status 或自行分状态查询合并.
+
         Args:
             csrc_code: 证监会行业代码, 如 C36=汽车制造业.
             stock_audit_num: 项目审核编号, 精确匹配单条项目.
             issue_market_type: 上市板块, 1=科创板 2=主板, 逗号分隔.
+            curr_status: 审核状态, 2=在审 5=注册结果 8=终止;
+                留空表示仅查在审状态项目.
             is_pagination: 是否启用分页.
             page_no: 页码, 从 1 开始.
             page_size: 每页条数, 最大 100.
@@ -322,10 +340,66 @@ class SSEClient(BaseHttpClient):
             params['csrcCode'] = csrc_code
         if stock_audit_num is not None:
             params['stockAuditNum'] = stock_audit_num
+        if curr_status:
+            params['currStatus'] = curr_status
 
         return self.call_api(
             api_id='sse_ipo_project_query', params=params
         )
+
+    def query_projects_all_status(
+        self,
+        csrc_code: str | None = None,
+        issue_market_type: str = '1,2',
+        page_size: int = 100,
+    ) -> list[IPOProjectItem]:
+        """按全部审核状态分桶查询并按审核编号去重.
+
+        逐桶遍历 PROJECT_STATUS_BUCKETS 并分页拉取, 合并后按
+        stockAuditNum 去重, 得到包含在审/注册结果/终止在内的
+        全量项目列表.
+
+        【重要】不要直接用 query_projects 的默认结果当全量口径,
+        那只有在审状态项目.
+
+        Args:
+            csrc_code: 证监会行业代码, 如 C36=汽车制造业.
+            issue_market_type: 上市板块, 1=科创板 2=主板, 逗号分隔.
+            page_size: 每页条数, 最大 100.
+
+        Returns:
+            全状态去重后的项目列表.
+        """
+        merged: list[IPOProjectItem] = []
+        seen_audit_nums: set[str] = set()
+
+        for status in self.PROJECT_STATUS_BUCKETS:
+            page_no = 1
+            while True:
+                resp = self.query_projects(
+                    csrc_code=csrc_code,
+                    issue_market_type=issue_market_type,
+                    curr_status=status,
+                    is_pagination=True,
+                    page_no=page_no,
+                    page_size=page_size,
+                )
+                page = resp.pageHelp
+                for project in page.data:
+                    if project.stockAuditNum in seen_audit_nums:
+                        continue
+                    seen_audit_nums.add(project.stockAuditNum)
+                    merged.append(project)
+                logger.info(
+                    '全状态项目查询 | currStatus={} | 第{}/{}页 | '
+                    '累计唯一项目 {} 个',
+                    status, page_no, page.pageCount, len(merged),
+                )
+                if page_no >= page.pageCount or not page.data:
+                    break
+                page_no += 1
+
+        return merged
 
     def query_files(
         self,
