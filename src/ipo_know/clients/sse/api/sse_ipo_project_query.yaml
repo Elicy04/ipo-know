@@ -49,6 +49,17 @@ query_params:
     required: false
     default: "1,2"
     description: "上市板块筛选：1=科创板，2=主板，支持逗号分隔多选"
+  # 【重要】不传 currStatus（或传空串）时，后端只返回在审状态
+  # （已受理/已问询/上市委审议/提交注册等）的项目，注册生效、
+  # 终止等历史项目会被静默过滤。全量口径必须按状态分桶查询
+  # （见 SSEClient.query_projects_all_status）或显式传入目标状态。
+  - name: "currStatus"
+    type: "string"
+    required: false
+    description: >-
+      审核状态筛选：2=在审（已受理/已问询/上市委审议/提交注册），
+      5=注册结果（注册生效等），8=终止（终止审核/撤回等）；
+      不传或传空串时后端仅返回在审状态项目，全量口径需分状态查询后合并
 
   # ========== 分页参数（仅列表模式生效） ==========
   - name: "pageSize"

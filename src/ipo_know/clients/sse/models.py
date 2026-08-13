@@ -284,7 +284,8 @@ class FileItem(BaseModel):
         companyCode: 公司代码.
         fileName: PDF 文件名.
         companyAbbr: 公司简称.
-        filePath: 文件相对路径, 可拼接域名下载.
+        filePath: 文件相对路径. 【重要】拼接下载 URL 时, 静态资源域名
+            与本路径之间必须加 /stock 前缀, 否则 CDN 返回 302 至 /404.
         companyName: 公司全称.
         isPreviewFile: 是否支持在线预览.
         marketType: 市场板块编码.
@@ -301,7 +302,12 @@ class FileItem(BaseModel):
     companyCode: str = Field(description='公司代码')
     fileName: str = Field(description='PDF文件名')
     companyAbbr: str = Field(description='公司简称')
-    filePath: str = Field(description='文件相对路径, 可拼接域名下载')
+    filePath: str = Field(
+        description='文件相对路径. 【重要】拼接下载 URL 时, 静态资源域名'
+        '与本路径之间必须加 /stock 前缀, '
+        '例: https://static.sse.com.cn/stock{filePath}, '
+        '否则 CDN 返回 302 至 /404'
+    )
     companyName: str = Field(description='公司全称')
     isPreviewFile: str = Field(description='是否支持在线预览')
     marketType: int = Field(description='市场板块编码')
