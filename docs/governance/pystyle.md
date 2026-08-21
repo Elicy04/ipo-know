@@ -32,6 +32,23 @@ def viking_cafe_order(spam: str, beans: str, eggs: str | None = None) -> str:
 - 单行抑制示例：`x = 1  # noqa: F841  # 该变量由外部框架反射使用`
 - 代码块范围抑制使用 `# ruff: disable[规则代码]` 与 `# ruff: enable[规则代码]` 成对包裹
 - 文件级抑制在文件头部使用 `# ruff: noqa: 规则代码`
+- **独立脚本的 sys.path 导入模式**：当脚本需要动态修改 `sys.path` 后才能导入项目模块时（如集成测试脚本），必须在 `sys.path` 操作之后的导入行添加 `# noqa: E402` 抑制「模块级导入未在文件顶部」的警告，同时在 `sys.path` 操作前用注释说明理由。导入块与 `sys.path` 操作块之间保留两个空行以正确分隔导入组：
+
+```python
+# Yes — 独立脚本的 sys.path 动态导入模式
+import sys
+from pathlib import Path
+
+from loguru import logger
+
+
+# 将项目根目录加入 sys.path, 确保可以直接运行脚本
+_project_root = Path(__file__).resolve().parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from ipo_know.clients.bse.client import BSEClient  # noqa: E402
+```
 
 ---
 ### 2.2 Imports — 导入规则
@@ -59,6 +76,8 @@ import jodie  # 不清楚作者想导入哪个 jodie
 ### 2.3 Packages — 包路径
 
 **所有新代码**必须使用完整包名导入模块。不要假设主二进制文件所在目录在 `sys.path` 中。
+
+**例外**：独立运行的脚本（如集成测试、维护脚本）可在文件顶部通过 `sys.path.insert` 动态添加项目根目录，参见 2.1 节的 `# noqa: E402` 示例。
 
 ### 2.4 Exceptions — 异常处理
 
