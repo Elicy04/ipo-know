@@ -1,8 +1,10 @@
 """临时脚本: 清空火山知识库 (初始化用).
 
-删除知识库中的全部切片与全部文档. 切片拉取不按 doc_id 过滤,
-可覆盖文档已删除但切片残留的孤儿切片; 执行前需输入 DELETE
-二次确认, --dry-run 仅盘点数量不删除.
+删除知识库中的全部切片与全部文档, 不按数据源前缀隔离,
+会一并删除全部数据源 (sse_/bse_/szse_) 的文档与切片.
+切片拉取不按 doc_id 过滤, 可覆盖文档已删除但切片残留的
+孤儿切片; 执行前需输入 DELETE 二次确认, --dry-run 仅盘点
+数量不删除.
 
 用法:
     uv run python purge_kb_volc.py --dry-run  # 只盘点文档/切片数量
@@ -26,7 +28,8 @@ async def main() -> None:
     aligner = VolcKBAligner()
 
     if not dry_run:
-        answer = input('此操作将删除知识库全部文档与切片, '
+        answer = input('此操作将删除知识库内全部数据源 '
+                       '(sse_/bse_/szse_) 的文档与切片, '
                        '输入 DELETE 确认执行: ')
         if answer.strip() != 'DELETE':
             print('已取消, 未执行任何删除')

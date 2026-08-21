@@ -88,6 +88,7 @@ class VikingKnowledgeSettings(pydantic.BaseModel):
         IPO_KNOW_VIKING_KNOWLEDGE__COLLECTION_NAME=...
         IPO_KNOW_VIKING_KNOWLEDGE__PROJECT_NAME=...
         IPO_KNOW_VIKING_KNOWLEDGE__RESOURCE_ID=...
+        IPO_KNOW_VIKING_KNOWLEDGE__STRATEGY_RESOURCE_ID=...
 
     Attributes:
         host: 知识库服务域名.
@@ -99,6 +100,8 @@ class VikingKnowledgeSettings(pydantic.BaseModel):
         collection_name: 默认知识库名称, 与 resource_id 二选一.
         project_name: 默认项目名称.
         resource_id: 默认知识库唯一 ID, 与 collection_name 二选一.
+        strategy_resource_id: 上传文档使用的切片策略资源 ID,
+            留空时不传该参数, 由知识库使用自身默认切片策略.
     """
 
     host: str = 'api-knowledgebase.mlp.cn-beijing.volces.com'
@@ -110,6 +113,7 @@ class VikingKnowledgeSettings(pydantic.BaseModel):
     collection_name: str = ''
     project_name: str = 'default'
     resource_id: str = 'kb-532b499a85fd935a'
+    strategy_resource_id: str = ''
 
 
 class AliyunKnowledgeSettings(pydantic.BaseModel):
