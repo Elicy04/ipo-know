@@ -74,6 +74,7 @@ class ConfigPanel:
         _is_running: 判断是否有后台任务正在执行的回调.
         _fields: 表单输入组件字典, key 为配置字段名.
         _testing: 连通性测试后台任务是否进行中.
+        _container: 面板根容器, 供后台任务恢复 UI 上下文.
     """
 
     def __init__(
@@ -93,6 +94,7 @@ class ConfigPanel:
         self._save_btn: ui.button | None = None
         self._test_btn: ui.button | None = None
         self._testing: bool = False
+        self._container: ui.card | None = None
         self._build_ui()
         self._load_from_store()
 
@@ -101,7 +103,9 @@ class ConfigPanel:
     # --------------------------------------------------
     def _build_ui(self) -> None:
         """构建面板 UI 布局."""
-        with ui.card().classes('w-full p-4 gap-2'):
+        container = ui.card().classes('w-full p-4 gap-2')
+        self._container = container
+        with container:
             # 标题行: 左侧标题, 右侧连通性测试按钮
             with ui.row().classes(
                 'w-full items-center mb-2 gap-2'
@@ -237,6 +241,32 @@ class ConfigPanel:
         except Exception as exc:
             ui.notify(f'保存失败: {exc}', type='negative')
 
+    def _safe_notify(
+        self,
+        message: str,
+        type: str | None = None,
+    ) -> None:
+        """在后台任务上下文中安全调用 ``ui.notify``.
+
+        ``ui.notify`` 依赖当前 asyncio 任务的槽位栈解析
+        客户端, 而 ``background_tasks.create`` 启动的任务
+        槽位栈为空, 直接调用会抛 RuntimeError. 此处先
+        进入面板根容器槽位恢复客户端上下文; 通知本身
+        失败时仅记录日志, 不掩盖测试结果.
+
+        Args:
+            message: 通知正文.
+            type: 通知类型 (positive/negative/warning 等).
+        """
+        try:
+            if self._container is not None:
+                with self._container:
+                    ui.notify(message, type=type)
+            else:
+                ui.notify(message, type=type)
+        except Exception:
+            logger.exception('界面通知发送失败: {}', message)
+
     # --------------------------------------------------
     # 连通性测试
     # --------------------------------------------------
@@ -294,13 +324,13 @@ class ConfigPanel:
             await client.check_connection()
         except Exception as exc:
             logger.exception('阿里云连通性测试失败')
-            ui.notify(
+            self._safe_notify(
                 f'连接失败: {_error_summary(exc)}',
                 type='negative',
             )
         else:
             logger.info('阿里云连通性测试成功')
-            ui.notify('阿里云连接成功', type='positive')
+            self._safe_notify('阿里云连接成功', type='positive')
         finally:
             self._testing = False
             if self._test_btn is not None:
