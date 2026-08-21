@@ -15,6 +15,17 @@ import tenacity
 from loguru import logger
 
 
+# 下载请求头: 部分站点 (如 bse.cn) 对无浏览器 User-Agent
+# 的请求直接返回 403, 统一携带浏览器 UA 规避拦截.
+_DOWNLOAD_HEADERS: dict[str, str] = {
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:154.0) '
+        'Gecko/20100101 Firefox/154.0'
+    ),
+    'Accept': '*/*; q=0.01',
+}
+
+
 class Downloader:
     """通用文件下载器.
 
@@ -106,7 +117,9 @@ class Downloader:
                     follow_redirects=True,
                     timeout=httpx.Timeout(self._timeout),
                 ) as client,
-                client.stream('GET', url) as response,
+                client.stream(
+                    'GET', url, headers=_DOWNLOAD_HEADERS,
+                ) as response,
             ):
                 response.raise_for_status()
                 with open(file_path, 'wb') as f:
