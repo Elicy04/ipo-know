@@ -69,6 +69,7 @@ class OperationPanel:
         _log_panel: 日志面板, 用于启停日志捕获.
         _running: 后台任务是否正在运行.
         _cached_files: 分步模式下爬取阶段缓存的文件清单.
+        _container: 面板根容器, 供后台任务恢复 UI 上下文.
     """
 
     def __init__(
@@ -98,6 +99,7 @@ class OperationPanel:
         self._btn_upload: ui.button | None = None
         self._btn_console: ui.button | None = None
         self._spinner: ui.spinner | None = None
+        self._container: ui.card | None = None
 
         self._build_ui()
 
@@ -113,11 +115,42 @@ class OperationPanel:
         return self._running
 
     # --------------------------------------------------
+    # 后台任务安全的 UI 反馈
+    # --------------------------------------------------
+    def _safe_notify(
+        self,
+        message: str,
+        type: str | None = None,
+    ) -> None:
+        """在后台任务上下文中安全调用 ``ui.notify``.
+
+        ``ui.notify`` 依赖当前 asyncio 任务的槽位栈解析
+        客户端, 而 ``background_tasks.create`` 启动的任务
+        槽位栈为空, 直接调用会抛 RuntimeError. 此处先
+        进入面板根容器槽位恢复客户端上下文; 通知本身
+        失败时仅记录日志, 不掩盖流水线结果.
+
+        Args:
+            message: 通知正文.
+            type: 通知类型 (positive/negative/warning 等).
+        """
+        try:
+            if self._container is not None:
+                with self._container:
+                    ui.notify(message, type=type)
+            else:
+                ui.notify(message, type=type)
+        except Exception:
+            logger.exception('界面通知发送失败: {}', message)
+
+    # --------------------------------------------------
     # UI 构建
     # --------------------------------------------------
     def _build_ui(self) -> None:
         """构建操作面板 UI 布局."""
-        with ui.card().classes('w-full p-4 gap-2'):
+        container = ui.card().classes('w-full p-4 gap-2')
+        self._container = container
+        with container:
             ui.label('操作面板').classes(
                 'text-lg font-bold mb-2'
             )
@@ -321,10 +354,10 @@ class OperationPanel:
                     source, industry
                 )
                 await self._upload_single(source, files)
-            ui.notify('执行完成', type='positive')
+            self._safe_notify('执行完成', type='positive')
         except Exception as exc:
             logger.exception('一键爬取上传执行失败')
-            ui.notify(
+            self._safe_notify(
                 f'执行失败: {_error_summary(exc)}',
                 type='negative',
             )
@@ -358,12 +391,12 @@ class OperationPanel:
                     source, industry
                 )
                 self._cached_files = {source: files}
-            ui.notify(
+            self._safe_notify(
                 '采集完成, 可执行上传对齐', type='positive'
             )
         except Exception as exc:
             logger.exception('文件清单采集失败')
-            ui.notify(
+            self._safe_notify(
                 f'采集失败: {_error_summary(exc)}',
                 type='negative',
             )
@@ -379,10 +412,10 @@ class OperationPanel:
         self._log_panel.start_capture()
         try:
             await self._upload_all(self._cached_files)
-            ui.notify('上传对齐完成', type='positive')
+            self._safe_notify('上传对齐完成', type='positive')
         except Exception as exc:
             logger.exception('上传对齐执行失败')
-            ui.notify(
+            self._safe_notify(
                 f'上传失败: {_error_summary(exc)}',
                 type='negative',
             )
