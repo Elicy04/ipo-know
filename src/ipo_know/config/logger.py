@@ -5,14 +5,32 @@
 logger 使用.
 """
 
+import os
 import sys
 from pathlib import Path
 
 from loguru import logger as _logger
 
 
+def default_log_dir() -> Path:
+    """计算默认日志目录.
+
+    与 FileMappingStore / GUIConfigStore 的存储策略一致, 使用
+    ``%LOCALAPPDATA%/ipo_know/logs``; 环境变量缺失时回退到
+    ``~/.ipo_know/logs``. 这样在冻结产物从快捷方式/开始菜单
+    启动、工作目录不可控时日志仍写入固定位置.
+
+    Returns:
+        Path: 默认日志目录路径 (尚未创建, 由调用方负责创建).
+    """
+    app_data_root = os.getenv('LOCALAPPDATA')
+    if app_data_root:
+        return Path(app_data_root) / 'ipo_know' / 'logs'
+    return Path.home() / '.ipo_know' / 'logs'
+
+
 def setup_logging(
-    log_dir: str | Path = 'logs',
+    log_dir: str | Path | None = None,
     console_level: str = 'INFO',
     rotation: str = '00:00',
     retention: str = '30 days',
@@ -30,7 +48,9 @@ def setup_logging(
                     30 天保留, 自动 zip 压缩
 
     Args:
-        log_dir:        日志文件输出目录, 自动递归创建
+        log_dir:        日志文件输出目录, 自动递归创建; 为 None 时
+                        使用 ``%LOCALAPPDATA%/ipo_know/logs``, 开发
+                        模式与冻结模式行为一致
         console_level:  控制台最低日志级别, 不影响文件通道
         rotation:       文件轮转策略: '00:00' 每天零点 /
                         '10 MB' 按大小
@@ -59,6 +79,8 @@ def setup_logging(
     )
 
     # 3. 文件通道: 全级别 + 轮转/保留/压缩
+    if log_dir is None:
+        log_dir = default_log_dir()
     log_path = Path(log_dir) / 'ipo_know_{time:YYYY-MM-DD}.log'
     log_dir_resolved = Path(log_dir).resolve()
     log_dir_resolved.mkdir(parents=True, exist_ok=True)
