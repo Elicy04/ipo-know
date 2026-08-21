@@ -8,7 +8,6 @@ import logging
 import sys
 from pathlib import Path
 
-from nicegui import app
 from nicegui import ui
 
 from ipo_know.config.logger import setup_logging
@@ -198,9 +197,8 @@ def main() -> None:
     # 启动预检: .NET / WebView2 环境检测
     precheck_runtime_environment()
 
-    # 注册视频静态资源
+    # favicon 资源路径
     assets_dir = Path(__file__).parent / 'assets'
-    app.add_media_files('/assets', assets_dir)
     favicon_path = assets_dir / 'spider.png'
 
     # 共享实例
@@ -232,7 +230,7 @@ def main() -> None:
 
         # 填充左侧: 配置面板
         with left_col:
-            ConfigPanel(
+            config_panel = ConfigPanel(
                 config_store=config_store,
                 is_running=lambda: (
                     bool(operation_panel_ref)
@@ -247,6 +245,9 @@ def main() -> None:
                 log_panel=log_panel,
             )
         operation_panel_ref.append(operation_panel)
+
+        # 联动: 目标平台切换时显隐对应平台配置卡片
+        operation_panel.on_platform_change(config_panel.set_platform)
 
     # favicon 传本地 Path: NiceGUI 会以 FileResponse 挂载到
     # /favicon.ico; 传字符串路径会落入 data-URL 分支而失效
