@@ -179,6 +179,35 @@ class VikingKnowledgeClient:
         return payload
 
     # ==================================================
+    # 连通性测试
+    # ==================================================
+    async def check_connection(self) -> None:
+        """发起轻量只读调用以验证配置与网络连通性.
+
+        前置校验 AK/SK 非空、resource_id 或 collection_name
+        至少一个有效, 再调用列举文档接口 (offset=0, limit=1),
+        一次调用即可覆盖 AK/SK 鉴权、host 可达性与知识库
+        有效性的验证.
+
+        Raises:
+            ValueError: AK/SK 未配置, 或 resource_id 与
+                collection_name 均未配置.
+            Exception: 底层 SDK 返回的任何 API 错误.
+        """
+        if not self._config.ak or not self._config.sk:
+            raise ValueError(
+                '火山知识库 AK/SK 未配置, 请在 .env 中设置 '
+                'IPO_KNOW_VIKING_KNOWLEDGE__AK 与 '
+                'IPO_KNOW_VIKING_KNOWLEDGE__SK'
+            )
+        if not self._config.resource_id and not self._config.collection_name:
+            raise ValueError(
+                '火山知识库 resource_id 与 collection_name 均未配置, '
+                '至少需要配置其中一项'
+            )
+        await self.list_docs(ListDocsRequest(offset=0, limit=1))
+
+    # ==================================================
     # 文档管理
     # ==================================================
     async def add_doc_v2(
