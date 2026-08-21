@@ -74,6 +74,130 @@ class SSESettings(pydantic.BaseModel):
     config_dir: str = ''
 
 
+class VikingKnowledgeSettings(pydantic.BaseModel):
+    """火山引擎 VikingDB 知识库客户端配置.
+
+    支持环境变量覆盖 (由顶层 Settings 的 env_prefix 与
+    env_nested_delimiter 自动注入):
+        IPO_KNOW_VIKING_KNOWLEDGE__HOST=...
+        IPO_KNOW_VIKING_KNOWLEDGE__REGION=...
+        IPO_KNOW_VIKING_KNOWLEDGE__SCHEME=...
+        IPO_KNOW_VIKING_KNOWLEDGE__TIMEOUT=...
+        IPO_KNOW_VIKING_KNOWLEDGE__AK=...
+        IPO_KNOW_VIKING_KNOWLEDGE__SK=...
+        IPO_KNOW_VIKING_KNOWLEDGE__COLLECTION_NAME=...
+        IPO_KNOW_VIKING_KNOWLEDGE__PROJECT_NAME=...
+        IPO_KNOW_VIKING_KNOWLEDGE__RESOURCE_ID=...
+
+    Attributes:
+        host: 知识库服务域名.
+        region: 服务地域.
+        scheme: 请求协议, http 或 https.
+        timeout: 请求超时时间, 单位秒.
+        ak: 火山引擎 Access Key, 敏感信息, 建议从 .env 注入.
+        sk: 火山引擎 Secret Key, 敏感信息, 建议从 .env 注入.
+        collection_name: 默认知识库名称, 与 resource_id 二选一.
+        project_name: 默认项目名称.
+        resource_id: 默认知识库唯一 ID, 与 collection_name 二选一.
+    """
+
+    host: str = 'api-knowledgebase.mlp.cn-beijing.volces.com'
+    region: str = 'cn-beijing'
+    scheme: str = 'https'
+    timeout: int = 30
+    ak: str = ''
+    sk: str = ''
+    collection_name: str = ''
+    project_name: str = 'default'
+    resource_id: str = 'kb-532b499a85fd935a'
+
+
+class AliyunKnowledgeSettings(pydantic.BaseModel):
+    """阿里云百炼知识库客户端配置.
+
+    支持环境变量覆盖 (由顶层 Settings 的 env_prefix 与
+    env_nested_delimiter 自动注入):
+        IPO_KNOW_ALIYUN_KNOWLEDGE__AK=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__SK=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__ENDPOINT=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__REGION_ID=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__WORKSPACE_ID=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__INDEX_ID=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__CATEGORY_ID=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__PARSER=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__TIMEOUT=...
+
+    Attributes:
+        ak: 阿里云 AccessKey ID, 敏感信息, 建议从 .env 注入.
+        sk: 阿里云 AccessKey Secret, 敏感信息, 建议从 .env 注入.
+        endpoint: 百炼 OpenAPI 服务域名.
+        region_id: 服务地域.
+        workspace_id: 百炼业务空间 ID, 所有接口的必传路径参数.
+        index_id: 目标知识库 ID, 即 CreateIndex 返回的 Data.Id.
+        category_id: 数据中心分类 ID, 默认 default 系统分类.
+        parser: 文档解析器类型, 如 DASHSCOPE_DOCMIND / DOCMIND.
+        timeout: 请求超时时间, 单位秒.
+    """
+
+    ak: str = ''
+    sk: str = ''
+    endpoint: str = 'bailian.cn-beijing.aliyuncs.com'
+    region_id: str = 'cn-beijing'
+    workspace_id: str = ''
+    index_id: str = ''
+    category_id: str = 'default'
+    parser: str = 'DASHSCOPE_DOCMIND'
+    timeout: int = 30
+
+
+class EastmoneySettings(pydantic.BaseModel):
+    """东方财富数据接口配置.
+
+    支持环境变量覆盖:
+        IPO_KNOW_EASTMONEY__BASE_URL=...
+        IPO_KNOW_EASTMONEY__TIMEOUT=...
+
+    Attributes:
+        base_url: 东方财富数据中心 API 域名.
+        timeout: HTTP 请求超时时间, 单位秒.
+    """
+
+    base_url: str = 'https://datacenter-web.eastmoney.com'
+    timeout: int = 10
+
+
+class BSESettings(pydantic.BaseModel):
+    """北交所 IPO 审核信息披露平台配置.
+
+    支持环境变量覆盖:
+        IPO_KNOW_BSE__BASE_URL=...
+        IPO_KNOW_BSE__TIMEOUT=...
+
+    Attributes:
+        base_url: 北交所官网域名.
+        timeout: HTTP 请求超时时间, 单位秒.
+    """
+
+    base_url: str = 'https://www.bse.cn'
+    timeout: int = 10
+
+
+class SZSESettings(pydantic.BaseModel):
+    """深交所注册制审核平台配置.
+
+    支持环境变量覆盖:
+        IPO_KNOW_SZSE__BASE_URL=...
+        IPO_KNOW_SZSE__TIMEOUT=...
+
+    Attributes:
+        base_url: 深交所官网域名.
+        timeout: HTTP 请求超时时间, 单位秒.
+    """
+
+    base_url: str = 'https://www.szse.cn'
+    timeout: int = 15
+
+
 class Settings(pydantic_settings.BaseSettings):
     """应用全局配置, 基于 pydantic-settings v2.
 
@@ -94,6 +218,11 @@ class Settings(pydantic_settings.BaseSettings):
         database: 数据库配置.
         sse: 上交所 API 配置.
         deepseek_api_key: DeepSeek API 密钥.
+        viking_knowledge: 火山引擎知识库配置.
+        aliyun_knowledge: 阿里云百炼知识库配置.
+        eastmoney: 东方财富数据接口配置.
+        bse: 北交所 IPO 审核信息披露平台配置.
+        szse: 深交所注册制审核平台配置.
     """
 
     model_config = pydantic_settings.SettingsConfigDict(
@@ -112,6 +241,21 @@ class Settings(pydantic_settings.BaseSettings):
     deepseek_api_key: str = pydantic.Field(
         default='',
         description='DeepSeek API 密钥, 对应环境变量 IPO_KNOW_DEEPSEEK_API_KEY',
+    )
+    viking_knowledge: VikingKnowledgeSettings = pydantic.Field(
+        default_factory=VikingKnowledgeSettings,
+    )
+    aliyun_knowledge: AliyunKnowledgeSettings = pydantic.Field(
+        default_factory=AliyunKnowledgeSettings,
+    )
+    eastmoney: EastmoneySettings = pydantic.Field(
+        default_factory=EastmoneySettings,
+    )
+    bse: BSESettings = pydantic.Field(
+        default_factory=BSESettings,
+    )
+    szse: SZSESettings = pydantic.Field(
+        default_factory=SZSESettings,
     )
 
 

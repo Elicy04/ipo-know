@@ -30,3 +30,12 @@ tmp/
 # System
 .DS_Store
 Thumbs.db
+
+# 运行日志
+logs/
+*.log
+
+# 工具生成产物
+.qoder/
+.ruff_cache/
+.trae/
