@@ -2,28 +2,28 @@
 # build_onedir.ps1 — IPO Know 一键打包脚本（PyInstaller onedir）
 #
 # 用途:
-#   构建 onedir 目录式产物 dist\ipo-know-onedir\（主 exe + 运行时 DLL/依赖）。
+#   构建 onedir 目录式产物 dist\ipo-know-crawler\（主 exe + 运行时 DLL/依赖）。
 #   收集参数与 onefile 链路（ipo-know.spec）完全相同，仅打包模式不同。
 #
 # spec 策略:
-#   - 使用独立的 ipo-know-onedir.spec，避免与 onefile 的 ipo-know.spec 冲突
+#   - 使用独立的 ipo-know-crawler.spec，避免与 onefile 的 ipo-know.spec 冲突
 #     （PyInstaller 命令行构建会重写同名 spec）。
 #   - spec 不存在时，脚本用完整 CLI 参数首次构建并自动生成该 spec；
 #     之后一律基于 spec 构建（与 build.ps1 同模式）。
 #
 # 用法:
 #   .\build_onedir.ps1           增量构建（利用 PyInstaller 缓存，重建很快）
-#   .\build_onedir.ps1 -Clean    构建前删除 build\ipo-know-onedir 缓存目录
+#   .\build_onedir.ps1 -Clean    构建前删除 build\ipo-know-crawler 缓存目录
 #
 # 说明:
 #   - 可从任意目录调用（内部使用 $PSScriptRoot 定位项目根）
 #   - 构建失败时以非零退出码结束
-#   - onedir 产物必须整个 dist\ipo-know-onedir 目录一起分发，不可只复制 exe
+#   - onedir 产物必须整个 dist\ipo-know-crawler 目录一起分发，不可只复制 exe
 # =============================================================================
 
 [CmdletBinding()]
 param(
-    # 构建前删除 build\ipo-know-onedir 缓存目录，强制全新构建
+    # 构建前删除 build\ipo-know-crawler 缓存目录，强制全新构建
     [switch]$Clean
 )
 
@@ -32,17 +32,17 @@ $ProjectRoot = $PSScriptRoot
 Set-Location $ProjectRoot
 
 $PythonExe     = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
-$SpecFile      = Join-Path $ProjectRoot 'ipo-know-onedir.spec'
+$SpecFile      = Join-Path $ProjectRoot 'ipo-know-crawler.spec'
 $EntryFile     = Join-Path $ProjectRoot 'pack_main.py'
-$BuildCacheDir = Join-Path $ProjectRoot 'build\ipo-know-onedir'
-$DistDir       = Join-Path $ProjectRoot 'dist\ipo-know-onedir'
-$Artifact      = Join-Path $DistDir 'ipo-know-onedir.exe'
+$BuildCacheDir = Join-Path $ProjectRoot 'build\ipo-know-crawler'
+$DistDir       = Join-Path $ProjectRoot 'dist\ipo-know-crawler'
+$Artifact      = Join-Path $DistDir 'ipo-know-crawler.exe'
 
 # onedir 产物目录预期下限（MB），低于该值视为构建不完整
 $MinDirSizeMB = 50
 
 # 首次生成 spec 用的完整 CLI 参数（与 onefile 历史命令一致，仅模式为 --onedir）
-$FirstBuildArgs = '-m PyInstaller --name ipo-know-onedir --windowed --onedir --noconfirm' `
+$FirstBuildArgs = '-m PyInstaller --name ipo-know-crawler --windowed --onedir --noconfirm' `
     + ' --add-data ".venv\Lib\site-packages\nicegui;nicegui" --collect-submodules nicegui' `
     + ' --collect-all webview --collect-all pythonnet --hidden-import clr_loader' `
     + ' --add-data "src\ipo_know\ui\assets;ipo_know\ui\assets"' `
@@ -101,11 +101,11 @@ if ($Clean) {
         Remove-Item -Recurse -Force $BuildCacheDir
         Write-Host "  已删除: $BuildCacheDir"
     } else {
-        Write-Host '  build\ipo-know-onedir 目录不存在，无需清理'
+        Write-Host '  build\ipo-know-crawler 目录不存在，无需清理'
     }
 } else {
     Write-Host ''
-    Write-Host '[2/4] 增量构建模式（保留 build\ipo-know-onedir 缓存）' -ForegroundColor Cyan
+    Write-Host '[2/4] 增量构建模式（保留 build\ipo-know-crawler 缓存）' -ForegroundColor Cyan
 }
 
 # -----------------------------------------------------------------------------
@@ -119,7 +119,7 @@ if ($SpecExists) {
     Write-Host "  构建模式: 基于 spec ($SpecFile)"
 } else {
     $BuildArgs = $FirstBuildArgs
-    Write-Host '  构建模式: 完整 CLI 参数（首次生成 ipo-know-onedir.spec）'
+    Write-Host '  构建模式: 完整 CLI 参数（首次生成 ipo-know-crawler.spec）'
 }
 
 $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -238,7 +238,7 @@ Write-Host " 目录体积: $DirSizeMB MB（$FileCount 个文件）" -ForegroundC
 Write-Host " 更新时间: $($ArtifactItem.LastWriteTime)" -ForegroundColor Green
 Write-Host " 耗时: $Elapsed" -ForegroundColor Green
 Write-Host '----------------------------------------------' -ForegroundColor Green
-Write-Host ' 分发提示: onedir 产物需整个 dist\ipo-know-onedir 目录一起分发，' -ForegroundColor Yellow
+Write-Host ' 分发提示: onedir 产物需整个 dist\ipo-know-crawler 目录一起分发，' -ForegroundColor Yellow
 Write-Host '           不可只复制 exe!' -ForegroundColor Yellow
 Write-Host '==============================================' -ForegroundColor Green
 exit 0
