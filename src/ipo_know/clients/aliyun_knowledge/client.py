@@ -141,6 +141,11 @@ class AliyunKnowledgeClient:
             )
         return self._config.index_id
 
+    @property
+    def region_id(self) -> str:
+        """服务地域, 问答链路拼接 Host 使用, 总有默认值."""
+        return self._config.region_id
+
     # ==================================================
     # 异步桥接
     # ==================================================
@@ -347,6 +352,27 @@ class AliyunKnowledgeClient:
         """
         return await self._api_call(
             self._get_client().get_index_job_status,
+            self.workspace_id,
+            request,
+        )
+
+    # ==================================================
+    # 薄封装: 知识库检索
+    # ==================================================
+    async def retrieve(
+        self,
+        request: bailian_models.RetrieveRequest,
+    ) -> bailian_models.RetrieveResponse:
+        """在知识库中检索与查询相关的文本切片.
+
+        Args:
+            request: 检索请求, 含知识库 ID 与查询文本.
+
+        Returns:
+            检索响应, body.data.nodes 为命中的文本切片列表.
+        """
+        return await self._api_call(
+            self._get_client().retrieve,
             self.workspace_id,
             request,
         )

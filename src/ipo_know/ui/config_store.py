@@ -22,6 +22,8 @@ _DEFAULT_ALIYUN_KNOWLEDGE: dict[str, object] = {
     'category_id': 'default',
     'parser': 'DASHSCOPE_DOCMIND',
     'timeout': 30,
+    'api_key': '',
+    'agent_id': '',
 }
 
 # 火山引擎 VikingDB 知识库默认配置, 字段与默认值
@@ -39,6 +41,8 @@ _DEFAULT_VIKING_KNOWLEDGE: dict[str, object] = {
     'project_name': 'default',
     'resource_id': '',
     'strategy_resource_id': '',
+    'service_resource_id': '',
+    'api_key': '',
 }
 
 
@@ -79,10 +83,10 @@ class GUIConfigStore:
         """从 JSON 文件加载知识库平台配置.
 
         若文件不存在, 从全局 ``settings`` 读取当前值
-        作为初始填充并自动写入 JSON. 兼容旧版仅含
-        ``aliyun_knowledge`` 键的配置文件: 缺失的
-        ``viking_knowledge`` 键以默认值回填, 已存值
-        优先保留, 阿里云段原样不动.
+        作为初始填充并自动写入 JSON. 兼容旧版配置文件:
+        任一平台段缺失的键以默认值回填 (如阿里云段
+        新增的 ``api_key`` / ``agent_id``), 已存值优先
+        保留.
 
         Returns:
             包含 ``aliyun_knowledge`` 与
@@ -104,6 +108,12 @@ class GUIConfigStore:
                 'aliyun_knowledge': dict(_DEFAULT_ALIYUN_KNOWLEDGE),
                 'viking_knowledge': dict(_DEFAULT_VIKING_KNOWLEDGE),
             }
+        ak_raw = raw.get('aliyun_knowledge')
+        ak_data = ak_raw if isinstance(ak_raw, dict) else {}
+        raw['aliyun_knowledge'] = {
+            **_DEFAULT_ALIYUN_KNOWLEDGE,
+            **ak_data,
+        }
         volc_raw = raw.get('viking_knowledge')
         volc_data = volc_raw if isinstance(volc_raw, dict) else {}
         raw['viking_knowledge'] = {
@@ -165,7 +175,11 @@ class GUIConfigStore:
         settings 继承硬编码的知识库 ID: GUI 场景要求用户
         显式填写自己的知识库 ID. ``strategy_resource_id``
         从全局 settings 读取 (默认空, 留空走知识库默认
-        切片策略).
+        切片策略). ``service_resource_id`` 从全局 settings
+        读取 (默认空, 仅知识问答使用). ``api_key`` 从全局
+        settings 读取 (默认空, 仅知识问答鉴权使用).
+        阿里云段 ``api_key`` / ``agent_id`` 从全局 settings
+        读取 (默认空, 仅知识问答使用).
         """
         s = settings.aliyun_knowledge
         v = settings.viking_knowledge
@@ -180,6 +194,8 @@ class GUIConfigStore:
                 'category_id': s.category_id,
                 'parser': s.parser,
                 'timeout': s.timeout,
+                'api_key': s.api_key,
+                'agent_id': s.agent_id,
             },
             'viking_knowledge': {
                 'host': v.host,
@@ -192,5 +208,7 @@ class GUIConfigStore:
                 'project_name': v.project_name,
                 'resource_id': '',
                 'strategy_resource_id': v.strategy_resource_id,
+                'service_resource_id': v.service_resource_id,
+                'api_key': v.api_key,
             },
         }

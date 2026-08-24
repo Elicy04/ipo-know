@@ -89,6 +89,8 @@ class VikingKnowledgeSettings(pydantic.BaseModel):
         IPO_KNOW_VIKING_KNOWLEDGE__PROJECT_NAME=...
         IPO_KNOW_VIKING_KNOWLEDGE__RESOURCE_ID=...
         IPO_KNOW_VIKING_KNOWLEDGE__STRATEGY_RESOURCE_ID=...
+        IPO_KNOW_VIKING_KNOWLEDGE__SERVICE_RESOURCE_ID=...
+        IPO_KNOW_VIKING_KNOWLEDGE__API_KEY=...
 
     Attributes:
         host: 知识库服务域名.
@@ -102,6 +104,10 @@ class VikingKnowledgeSettings(pydantic.BaseModel):
         resource_id: 默认知识库唯一 ID, 与 collection_name 二选一.
         strategy_resource_id: 上传文档使用的切片策略资源 ID,
             留空时不传该参数, 由知识库使用自身默认切片策略.
+        service_resource_id: 知识问答使用的服务资源 ID,
+            仅知识问答 (service_chat) 场景使用, 留空时不传该参数.
+        api_key: 火山方舟 API Key, 仅知识问答 (service_chat)
+            使用, 该接口强制 API Key 鉴权, IAM AK/SK 不可用.
     """
 
     host: str = 'api-knowledgebase.mlp.cn-beijing.volces.com'
@@ -114,6 +120,14 @@ class VikingKnowledgeSettings(pydantic.BaseModel):
     project_name: str = 'default'
     resource_id: str = 'kb-532b499a85fd935a'
     strategy_resource_id: str = ''
+    service_resource_id: str = ''
+    api_key: str = pydantic.Field(
+        default='',
+        description=(
+            '火山方舟 API Key, 仅知识问答 (service_chat) 使用, '
+            '对应环境变量 IPO_KNOW_VIKING_KNOWLEDGE__API_KEY'
+        ),
+    )
 
 
 class AliyunKnowledgeSettings(pydantic.BaseModel):
@@ -130,6 +144,8 @@ class AliyunKnowledgeSettings(pydantic.BaseModel):
         IPO_KNOW_ALIYUN_KNOWLEDGE__CATEGORY_ID=...
         IPO_KNOW_ALIYUN_KNOWLEDGE__PARSER=...
         IPO_KNOW_ALIYUN_KNOWLEDGE__TIMEOUT=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__API_KEY=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__AGENT_ID=...
 
     Attributes:
         ak: 阿里云 AccessKey ID, 敏感信息, 建议从 .env 注入.
@@ -141,6 +157,10 @@ class AliyunKnowledgeSettings(pydantic.BaseModel):
         category_id: 数据中心分类 ID, 默认 default 系统分类.
         parser: 文档解析器类型, 如 DASHSCOPE_DOCMIND / DOCMIND.
         timeout: 请求超时时间, 单位秒.
+        api_key: 百炼 API-Key, 仅知识问答使用, 该接口为
+            Bearer 鉴权的独立 REST 链路, AK/SK 不可用.
+        agent_id: 知识问答服务应用 ID (aid-xxx), 仅知识问答
+            使用, 在百炼控制台知识问答页面创建并发布后获取.
     """
 
     ak: str = ''
@@ -152,6 +172,20 @@ class AliyunKnowledgeSettings(pydantic.BaseModel):
     category_id: str = 'default'
     parser: str = 'DASHSCOPE_DOCMIND'
     timeout: int = 30
+    api_key: str = pydantic.Field(
+        default='',
+        description=(
+            '百炼 API-Key, 仅知识问答使用, '
+            '对应环境变量 IPO_KNOW_ALIYUN_KNOWLEDGE__API_KEY'
+        ),
+    )
+    agent_id: str = pydantic.Field(
+        default='',
+        description=(
+            '知识问答服务应用 ID (aid-xxx), 仅知识问答使用, '
+            '对应环境变量 IPO_KNOW_ALIYUN_KNOWLEDGE__AGENT_ID'
+        ),
+    )
 
 
 class EastmoneySettings(pydantic.BaseModel):

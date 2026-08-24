@@ -5,18 +5,21 @@ async 接口, 内部通过 asyncio.to_thread 将同步 SDK 调用投递到线程
 避免阻塞事件循环.
 
 覆盖文档管理、切片 (Chunk) 管理、知识库检索与对话补全等接口.
+流式接口支持通过 threading.Event 停止标志即时中止生成.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from collections.abc import Callable
-from collections.abc import Iterable
+from collections.abc import Iterator
 from collections.abc import Mapping
 
 from loguru import logger
 from vikingdb import IAM
+from vikingdb import APIKey
 from vikingdb import KnowledgeCollection
 from vikingdb import VikingKnowledge
 from vikingdb.knowledge import AddDocV2Request
@@ -44,16 +47,29 @@ from ipo_know.config.config import VikingKnowledgeSettings
 from ipo_know.config.config import settings
 
 
+# 问答链路 (API Key 实例) 超时秒数: 推理模型长思考静默期
+# 可能超过管理链路默认 30s, 单独放宽并与阿里云问答链路
+# 120s 对齐. 已核验 .venv 中 VikingKnowledge 构造的
+# timeout 为单一 int 数值 (同时作为 connect 与 socket
+# 超时), 故整体取值.
+_CHAT_TIMEOUT_SECONDS = 120
+
+
 class VikingKnowledgeClient:
     """火山引擎 VikingDB 知识库异步客户端.
 
     薄封装官方 SDK 的同步接口, 对外提供 async 方法. 底层 SDK
     (VikingKnowledge / KnowledgeCollection) 在首次调用时懒加载,
-    鉴权采用 AK/SK (IAM).
+    文档/切片/检索链路的鉴权采用 AK/SK (IAM); 知识问答
+    (service_chat) 接口强制 API Key 鉴权, 使用独立的
+    API Key 实例, 两个实例互不影响.
 
     Attributes:
         _config: 知识库配置.
-        _client: 底层 VikingKnowledge 同步客户端 (懒加载).
+        _client: 底层 VikingKnowledge 同步客户端 (IAM 鉴权,
+            懒加载).
+        _api_key_client: 底层 VikingKnowledge 同步客户端
+            (API Key 鉴权, 懒加载, 仅知识问答使用).
         _collection: 底层 KnowledgeCollection 同步集合 (懒加载).
     """
 
@@ -69,6 +85,7 @@ class VikingKnowledgeClient:
         """
         self._config = config or settings.viking_knowledge
         self._client: VikingKnowledge | None = None
+        self._api_key_client: VikingKnowledge | None = None
         self._collection: KnowledgeCollection | None = None
         logger.info(
             '火山知识库客户端初始化 | host={} | region={} | scheme={}',
@@ -99,6 +116,36 @@ class VikingKnowledgeClient:
             )
         return self._client
 
+    def _get_api_key_client(self) -> VikingKnowledge:
+        """懒加载 API Key 鉴权的 VikingKnowledge 客户端.
+
+        仅供知识问答 (service_chat) 链路使用: 该接口强制
+        API Key 鉴权, IAM AK/SK 会报 apikey is empty.
+        连接参数 host/region/scheme 复用同一配置, 超时
+        单独放宽到 ``_CHAT_TIMEOUT_SECONDS`` (推理模型长
+        思考静默期保护); 无需 ak/sk; 问答依赖请求体中的
+        service_resource_id, 与知识库 resource_id 无关.
+
+        Raises:
+            ValueError: api_key 未配置.
+        """
+        if self._api_key_client is None:
+            if not self._config.api_key:
+                raise ValueError(
+                    '问答需要 API Key, 请到平台配置页签的'
+                    '问答配置区填写 (或设置环境变量 '
+                    'IPO_KNOW_VIKING_KNOWLEDGE__API_KEY)'
+                )
+            auth = APIKey(api_key=self._config.api_key)
+            self._api_key_client = VikingKnowledge(
+                host=self._config.host,
+                region=self._config.region,
+                auth=auth,
+                scheme=self._config.scheme,
+                timeout=_CHAT_TIMEOUT_SECONDS,
+            )
+        return self._api_key_client
+
     def _get_collection(self) -> KnowledgeCollection:
         """懒加载底层 KnowledgeCollection 同步集合."""
         if self._collection is None:
@@ -123,17 +170,47 @@ class VikingKnowledgeClient:
 
     async def _stream_in_thread(
         self,
-        func: Callable[..., Iterable[object]],
+        func: Callable[..., Iterator[object]],
         *args: object,
+        stop_event: threading.Event | None = None,
         **kwargs: object,
     ) -> AsyncIterator[object]:
-        """把同步生成器桥接为异步迭代器."""
+        """把同步生成器桥接为可取消的异步迭代器.
+
+        生产者线程逐片检查停止标志, 置位后丢弃剩余分片快速
+        退出; 消费端取消 (aclose / 提前跳出迭代) 时置位标志,
+        且不再等待生产者线程结束, 保证取消即时返回.
+
+        Warning:
+            取消/提前退出即时返回不代表底层 HTTP 流已关闭:
+            生产者线程可能仍在阻塞读取下一分片, 资源释放依赖
+            SDK 生成器自身在迭代终止后的清理行为.
+
+        Args:
+            func: 返回同步迭代器的工厂, 如 SDK 的流式接口.
+            *args: 透传给 func 的位置参数.
+            stop_event: 外部停止标志, 置位后停止产出; 为 None
+                时使用内部标志, 取消时自动置位. 外部传入时
+                本方法不会改写其置位状态.
+            **kwargs: 透传给 func 的关键字参数.
+
+        Yields:
+            同步生成器逐条产出的分片.
+        """
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
+        # 仅自持标志可在收尾时置位; 外部传入的 stop_event
+        # 生命周期归调用方所有, 误置位会污染复用同一 Event
+        # 的后续请求 (第二次请求会被立即中止)
+        owns_stop = stop_event is None
+        internal_stop = stop_event or threading.Event()
+        finished = False
 
         def _producer() -> None:
             try:
                 for item in func(*args, **kwargs):
+                    if internal_stop.is_set():
+                        break
                     loop.call_soon_threadsafe(
                         queue.put_nowait, (item, None)
                     )
@@ -147,13 +224,19 @@ class VikingKnowledgeClient:
             while True:
                 chunk = await queue.get()
                 if chunk is None:
+                    finished = True
                     break
                 item, exc = chunk
                 if exc is not None:
                     raise exc
+                if internal_stop.is_set():
+                    break
                 yield item
         finally:
-            await future
+            if owns_stop:
+                internal_stop.set()
+            if finished:
+                await future
 
     @staticmethod
     def _is_stream(request: object) -> bool:
@@ -526,7 +609,10 @@ class VikingKnowledgeClient:
         headers: Mapping[str, str] | None = None,
         timeout: int | None = None,
     ) -> ChatCompletionResponse:
-        """非流式对话补全.
+        """非流式对话补全 (IAM AK/SK 鉴权).
+
+        该接口当前不支持 API Key 作为知识库 SDK 鉴权,
+        故保持使用 IAM 实例.
 
         Args:
             request: 对话补全请求.
@@ -556,7 +642,7 @@ class VikingKnowledgeClient:
         headers: Mapping[str, str] | None = None,
         timeout: int | None = None,
     ) -> ServiceChatResponse:
-        """非流式服务对话.
+        """非流式服务对话 (API Key 鉴权).
 
         Args:
             request: 服务对话请求.
@@ -568,12 +654,12 @@ class VikingKnowledgeClient:
 
         Raises:
             ValueError: 请求开启 stream 时, 应改用
-                stream_service_chat.
+                stream_service_chat; 或 api_key 未配置.
         """
         if self._is_stream(request):
             raise ValueError('流式请求请改用 stream_service_chat')
         return await self._run_in_thread(
-            self._get_client().service_chat,
+            self._get_api_key_client().service_chat,
             request,
             headers=headers,
             timeout=timeout,
@@ -585,13 +671,20 @@ class VikingKnowledgeClient:
         *,
         headers: Mapping[str, str] | None = None,
         timeout: int | None = None,
+        stop_event: threading.Event | None = None,
     ) -> AsyncIterator[ChatCompletionResponse]:
-        """流式对话补全, 返回异步迭代器.
+        """流式对话补全 (IAM AK/SK 鉴权), 返回异步迭代器.
+
+        该接口当前不支持 API Key 作为知识库 SDK 鉴权,
+        故保持使用 IAM 实例.
 
         Args:
             request: 对话补全请求, 内部会强制开启 stream.
             headers: 额外请求头.
             timeout: 请求超时时间, 覆盖配置默认值.
+            stop_event: 停止标志, 置位后立即停止产出分片,
+                用于实现 "停止生成"; 为 None 时仅支持通过
+                取消迭代 (aclose) 停止.
 
         Returns:
             逐条产出对话补全响应的异步迭代器.
@@ -602,6 +695,7 @@ class VikingKnowledgeClient:
             payload,
             headers=headers,
             timeout=timeout,
+            stop_event=stop_event,
         )
 
     def stream_service_chat(
@@ -610,21 +704,29 @@ class VikingKnowledgeClient:
         *,
         headers: Mapping[str, str] | None = None,
         timeout: int | None = None,
+        stop_event: threading.Event | None = None,
     ) -> AsyncIterator[ServiceChatResponse]:
-        """流式服务对话, 返回异步迭代器.
+        """流式服务对话 (API Key 鉴权), 返回异步迭代器.
 
         Args:
             request: 服务对话请求, 内部会强制开启 stream.
             headers: 额外请求头.
             timeout: 请求超时时间, 覆盖配置默认值.
+            stop_event: 停止标志, 置位后立即停止产出分片,
+                用于实现 "停止生成"; 为 None 时仅支持通过
+                取消迭代 (aclose) 停止.
 
         Returns:
             逐条产出服务对话响应的异步迭代器.
+
+        Raises:
+            ValueError: api_key 未配置.
         """
         payload = self._normalize_stream_request(request)
         return self._stream_in_thread(
-            self._get_client().service_chat,
+            self._get_api_key_client().service_chat,
             payload,
             headers=headers,
             timeout=timeout,
+            stop_event=stop_event,
         )
