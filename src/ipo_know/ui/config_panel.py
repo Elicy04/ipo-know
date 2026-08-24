@@ -17,6 +17,8 @@ from ipo_know.clients.viking_knowledge import VikingKnowledgeClient
 from ipo_know.config.config import AliyunKnowledgeSettings
 from ipo_know.config.config import VikingKnowledgeSettings
 from ipo_know.ui.config_store import GUIConfigStore
+from ipo_know.ui.panel_helpers import error_summary
+from ipo_know.ui.panel_helpers import safe_notify
 
 
 # 阿里云连通性测试前必须填写的表单字段: (字段名, 展示名).
@@ -34,9 +36,6 @@ _VOLC_REQUIRED_FIELDS: tuple[tuple[str, str], ...] = (
     ('sk', 'SK'),
 )
 
-# 错误摘要在弹窗中的最大展示长度.
-_ERROR_SUMMARY_LIMIT = 100
-
 # timeout 数值框的缺省回退值, 与两个平台配置的默认值一致.
 _DEFAULT_TIMEOUT = 30
 
@@ -51,22 +50,6 @@ _VOLC_CONSOLE_URL = (
     'https://console.volcengine.com/ark/region:cn-beijing'
     '/knowledge/collection/list'
 )
-
-
-def _error_summary(exc: Exception) -> str:
-    """将异常压缩为适合弹窗展示的简短摘要.
-
-    Args:
-        exc: 捕获到的异常实例.
-
-    Returns:
-        截断到 ``_ERROR_SUMMARY_LIMIT`` 字符以内的错误描述.
-    """
-    text = str(exc) or exc.__class__.__name__
-    text = ' '.join(text.split())
-    if len(text) > _ERROR_SUMMARY_LIMIT:
-        return text[:_ERROR_SUMMARY_LIMIT] + '…'
-    return text
 
 
 def _stripped_value(value: object) -> object:
@@ -111,13 +94,15 @@ def _normalized_timeout(value: object) -> int:
 class ConfigPanel:
     """知识库平台配置编辑面板 (阿里云 + 火山引擎).
 
-    以 NiceGUI ui.card 为容器, 竖排展示两个平台的配置卡片:
-    常用表单字段直接展示, 低频配置项折叠在"高级配置"中,
+    以 NiceGUI ui.card 为容器, 竖排展示两个平台的配置卡片,
+    卡片内部按功能分区 (基本配置/同步配置/检索配置/问答
+    配置): 基本配置收纳各功能共有项, 阿里云的 endpoint/
+    region_id 低频项折叠在基本配置内的"高级配置"中;
     各卡片标题行右侧提供独立的"连通性测试"按钮, 卡片
-    底部提供各自的"保存配置"按钮 (仅保存本平台段),
-    保存按钮下方提供"打开知识库控制台"快捷跳转按钮
-    (与后台任务无关, 始终可用). 两卡片按操作面板当前
-    目标平台联动显隐.
+    底部提供一个"保存配置"按钮 (整卡全分区一次保存,
+    仅保存本平台段), 保存按钮下方提供"打开知识库控制台"
+    快捷跳转按钮 (与后台任务无关, 始终可用). 两卡片按
+    全局目标平台联动显隐.
 
     Attributes:
         _store: GUI 配置持久化存储实例.
@@ -182,6 +167,16 @@ class ConfigPanel:
     # --------------------------------------------------
     # UI 构建
     # --------------------------------------------------
+    @staticmethod
+    def _section_header(title: str) -> None:
+        """渲染功能分区标题: 分隔线 + 分区名.
+
+        Args:
+            title: 分区标题文本.
+        """
+        ui.separator().classes('mt-3')
+        ui.label(title).classes('text-base font-medium mt-1')
+
     def _build_ui(self) -> None:
         """构建面板 UI 布局."""
         container = ui.card().classes('w-full p-4 gap-2')
@@ -201,6 +196,8 @@ class ConfigPanel:
                     icon='network_check',
                 ).props('dense outline').classes('ml-auto')
 
+            # 分区一: 基本配置 (各功能共有项)
+            self._section_header('基本配置')
             self._fields['ak'] = (
                 ui.input(label='AK (AccessKey ID)')
                 .classes('w-full')
@@ -221,8 +218,13 @@ class ConfigPanel:
                 .classes('w-full')
                 .tooltip('知识库索引 ID')
             )
+            self._fields['timeout'] = (
+                ui.number(label='Timeout (秒)', value=30, min=1)
+                .classes('w-full')
+                .tooltip('API 请求超时时间(秒)')
+            )
 
-            # 低频配置项折叠到高级配置, 默认收起
+            # 低频连接参数折叠到高级配置, 默认收起
             with ui.expansion('高级配置').classes('w-full'):
                 self._fields['endpoint'] = (
                     ui.input(label='Endpoint')
@@ -234,21 +236,46 @@ class ConfigPanel:
                     .classes('w-full')
                     .tooltip('阿里云区域标识, 如 cn-beijing')
                 )
-                self._fields['category_id'] = (
-                    ui.input(label='Category ID')
-                    .classes('w-full')
-                    .tooltip('文档类目 ID, 默认 default')
+
+            # 分区二: 同步配置
+            self._section_header('同步配置')
+            self._fields['category_id'] = (
+                ui.input(label='Category ID')
+                .classes('w-full')
+                .tooltip('文档类目 ID, 默认 default')
+            )
+            self._fields['parser'] = (
+                ui.input(label='Parser')
+                .classes('w-full')
+                .tooltip('文档解析器, 如 DASHSCOPE_DOCMIND')
+            )
+
+            # 分区三: 检索配置 (本期无专属项, 文案占位)
+            self._section_header('检索配置')
+            ui.label(
+                '检索参数在知识检索页签查询时指定'
+            ).classes('text-sm text-gray-400')
+
+            # 分区四: 问答配置
+            self._section_header('问答配置')
+            self._fields['api_key'] = (
+                ui.input(label='API Key', password=True)
+                .classes('w-full')
+                .tooltip(
+                    '百炼 API-Key,'
+                    ' 仅知识问答使用,'
+                    ' 在百炼控制台 API Key 页面获取'
                 )
-                self._fields['parser'] = (
-                    ui.input(label='Parser')
-                    .classes('w-full')
-                    .tooltip('文档解析器, 如 DASHSCOPE_DOCMIND')
+            )
+            self._fields['agent_id'] = (
+                ui.input(label='知识问答服务 ID')
+                .classes('w-full')
+                .tooltip(
+                    '知识问答服务应用 ID (aid-xxx),'
+                    ' 仅知识问答使用,'
+                    ' 在百炼控制台知识问答页面创建并发布后获取'
                 )
-                self._fields['timeout'] = (
-                    ui.number(label='Timeout (秒)', value=30, min=1)
-                    .classes('w-full')
-                    .tooltip('API 请求超时时间(秒)')
-                )
+            )
 
             # 字符串输入框失焦/粘贴后即时去除首尾空白
             for field in self._fields.values():
@@ -291,6 +318,8 @@ class ConfigPanel:
                     icon='network_check',
                 ).props('dense outline').classes('ml-auto')
 
+            # 分区一: 基本配置 (各功能共有项)
+            self._section_header('基本配置')
             self._volc_fields['ak'] = (
                 ui.input(label='AK (Access Key)')
                 .classes('w-full')
@@ -301,6 +330,26 @@ class ConfigPanel:
                 .classes('w-full')
                 .tooltip('火山引擎 Secret Key')
             )
+            self._volc_fields['host'] = (
+                ui.input(label='Host')
+                .classes('w-full')
+                .tooltip('知识库服务域名')
+            )
+            self._volc_fields['region'] = (
+                ui.input(label='Region')
+                .classes('w-full')
+                .tooltip('服务地域, 如 cn-beijing')
+            )
+            self._volc_fields['scheme'] = (
+                ui.input(label='Scheme')
+                .classes('w-full')
+                .tooltip('请求协议, http 或 https, 默认 https')
+            )
+            self._volc_fields['timeout'] = (
+                ui.number(label='Timeout (秒)', value=30, min=1)
+                .classes('w-full')
+                .tooltip('API 请求超时时间(秒)')
+            )
             self._volc_fields['resource_id'] = (
                 ui.input(label='Resource ID')
                 .classes('w-full')
@@ -308,49 +357,54 @@ class ConfigPanel:
                     '知识库唯一 ID, 与 Collection Name 二选一'
                 )
             )
+            self._volc_fields['collection_name'] = (
+                ui.input(label='Collection Name')
+                .classes('w-full')
+                .tooltip(
+                    '知识库名称, 与 Resource ID 二选一'
+                )
+            )
 
-            # 低频配置项折叠到高级配置, 默认收起
-            with ui.expansion('高级配置').classes('w-full'):
-                self._volc_fields['host'] = (
-                    ui.input(label='Host')
-                    .classes('w-full')
-                    .tooltip('知识库服务域名')
+            # 分区二: 同步配置
+            self._section_header('同步配置')
+            self._volc_fields['project_name'] = (
+                ui.input(label='Project Name')
+                .classes('w-full')
+                .tooltip('项目名称, 默认 default')
+            )
+            self._volc_fields['strategy_resource_id'] = (
+                ui.input(label='切片策略 ID')
+                .classes('w-full')
+                .tooltip(
+                    '可选, 留空使用知识库默认切片策略,'
+                    ' 如 kb-strategy-xxxx'
                 )
-                self._volc_fields['region'] = (
-                    ui.input(label='Region')
-                    .classes('w-full')
-                    .tooltip('服务地域, 如 cn-beijing')
+            )
+
+            # 分区三: 检索配置 (本期无专属项, 文案占位)
+            self._section_header('检索配置')
+            ui.label(
+                '检索参数在知识检索页签查询时指定'
+            ).classes('text-sm text-gray-400')
+
+            # 分区四: 问答配置
+            self._section_header('问答配置')
+            self._volc_fields['service_resource_id'] = (
+                ui.input(label='知识服务 ID')
+                .classes('w-full')
+                .tooltip(
+                    '知识服务 resource_id,'
+                    ' 仅知识问答使用'
                 )
-                self._volc_fields['scheme'] = (
-                    ui.input(label='Scheme')
-                    .classes('w-full')
-                    .tooltip('请求协议, http 或 https, 默认 https')
+            )
+            self._volc_fields['api_key'] = (
+                ui.input(label='API Key', password=True)
+                .classes('w-full')
+                .tooltip(
+                    '仅知识问答使用,'
+                    ' 在火山方舟控制台获取'
                 )
-                self._volc_fields['collection_name'] = (
-                    ui.input(label='Collection Name')
-                    .classes('w-full')
-                    .tooltip(
-                        '知识库名称, 与 Resource ID 二选一'
-                    )
-                )
-                self._volc_fields['project_name'] = (
-                    ui.input(label='Project Name')
-                    .classes('w-full')
-                    .tooltip('项目名称, 默认 default')
-                )
-                self._volc_fields['strategy_resource_id'] = (
-                    ui.input(label='切片策略 ID')
-                    .classes('w-full')
-                    .tooltip(
-                        '可选, 留空使用知识库默认切片策略,'
-                        ' 如 kb-strategy-xxxx'
-                    )
-                )
-                self._volc_fields['timeout'] = (
-                    ui.number(label='Timeout (秒)', value=30, min=1)
-                    .classes('w-full')
-                    .tooltip('API 请求超时时间(秒)')
-                )
+            )
 
             # 字符串输入框失焦/粘贴后即时去除首尾空白
             for field in self._volc_fields.values():
@@ -497,32 +551,6 @@ class ConfigPanel:
         """用默认浏览器打开火山引擎知识库控制台."""
         webbrowser.open(_VOLC_CONSOLE_URL)
 
-    def _safe_notify(
-        self,
-        message: str,
-        type: str | None = None,
-    ) -> None:
-        """在后台任务上下文中安全调用 ``ui.notify``.
-
-        ``ui.notify`` 依赖当前 asyncio 任务的槽位栈解析
-        客户端, 而 ``background_tasks.create`` 启动的任务
-        槽位栈为空, 直接调用会抛 RuntimeError. 此处先
-        进入面板根容器槽位恢复客户端上下文; 通知本身
-        失败时仅记录日志, 不掩盖测试结果.
-
-        Args:
-            message: 通知正文.
-            type: 通知类型 (positive/negative/warning 等).
-        """
-        try:
-            if self._container is not None:
-                with self._container:
-                    ui.notify(message, type=type)
-            else:
-                ui.notify(message, type=type)
-        except Exception:
-            logger.exception('界面通知发送失败: {}', message)
-
     # --------------------------------------------------
     # 连通性测试
     # --------------------------------------------------
@@ -580,13 +608,16 @@ class ConfigPanel:
             await client.check_connection()
         except Exception as exc:
             logger.exception('阿里云连通性测试失败')
-            self._safe_notify(
-                f'连接失败: {_error_summary(exc)}',
+            safe_notify(
+                self._container,
+                f'连接失败: {error_summary(exc)}',
                 type='negative',
             )
         else:
             logger.info('阿里云连通性测试成功')
-            self._safe_notify('阿里云连接成功', type='positive')
+            safe_notify(
+                self._container, '阿里云连接成功', type='positive'
+            )
         finally:
             self._testing = False
             if self._test_btn is not None:
@@ -660,13 +691,16 @@ class ConfigPanel:
             await client.check_connection()
         except Exception as exc:
             logger.exception('火山引擎连通性测试失败')
-            self._safe_notify(
-                f'连接失败: {_error_summary(exc)}',
+            safe_notify(
+                self._container,
+                f'连接失败: {error_summary(exc)}',
                 type='negative',
             )
         else:
             logger.info('火山引擎连通性测试成功')
-            self._safe_notify('火山引擎连接成功', type='positive')
+            safe_notify(
+                self._container, '火山引擎连接成功', type='positive'
+            )
         finally:
             self._volc_testing = False
             if self._volc_test_btn is not None:

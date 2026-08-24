@@ -1,12 +1,11 @@
-"""操作面板: 数据源选择 + 目标平台 + 行业参数 + 一键/分步调度.
+"""操作面板: 数据源选择 + 行业参数 + 一键/分步调度.
 
-提供 SSE/BSE/SZSE/全部数据源切换, 阿里云/火山引擎目标平台
-选择, 一键全自动与分步执行两种运行模式, 以及完整的
-爬取-上传流水线后台调度.
+提供 SSE/BSE/SZSE/全部数据源切换, 一键全自动与分步执行
+两种运行模式, 以及完整的爬取-上传流水线后台调度.
+目标平台由外部 (全局平台下拉) 经 set_platform 注入.
 """
 
 import asyncio
-from collections.abc import Callable
 from typing import Any
 from typing import cast
 
@@ -14,7 +13,6 @@ from loguru import logger
 from nicegui import background_tasks
 from nicegui import run
 from nicegui import ui
-from nicegui.events import ValueChangeEventArguments
 
 from ipo_know.clients.aliyun_knowledge.client import AliyunKnowledgeClient
 from ipo_know.clients.viking_knowledge import VikingKnowledgeClient
@@ -26,6 +24,10 @@ from ipo_know.kb_align import VolcKBAligner
 from ipo_know.kb_align.aliyun_aligner import AliyunKBAligner
 from ipo_know.ui.config_store import GUIConfigStore
 from ipo_know.ui.log_panel import LogPanel
+from ipo_know.ui.panel_helpers import error_summary
+from ipo_know.ui.panel_helpers import safe_notify
+from ipo_know.ui.platform import PLATFORM_OPTIONS
+from ipo_know.ui.platform import missing_config_items
 
 
 _SOURCE_OPTIONS: dict[str, str] = {
@@ -35,59 +37,20 @@ _SOURCE_OPTIONS: dict[str, str] = {
     'all': '全部 (ALL)',
 }
 
-# 上传对齐的目标平台选项.
-_PLATFORM_OPTIONS: dict[str, str] = {
-    'aliyun': '阿里云百炼',
-    'volc': '火山引擎 VikingDB',
-}
-
-# 阿里云平台启动上传前必须已配置的字段: (字段名, 展示名).
-_ALIYUN_REQUIRED_FIELDS: tuple[tuple[str, str], ...] = (
-    ('ak', 'AK'),
-    ('sk', 'SK'),
-    ('workspace_id', 'Workspace ID'),
-    ('index_id', 'Index ID'),
-)
-
-# 火山引擎平台必须已配置的凭证字段: (字段名, 展示名).
-# 另需 resource_id 与 collection_name 至少其一, 单独校验.
-_VOLC_REQUIRED_FIELDS: tuple[tuple[str, str], ...] = (
-    ('ak', 'AK'),
-    ('sk', 'SK'),
-)
-
-# 错误摘要在弹窗中的最大展示长度.
-_ERROR_SUMMARY_LIMIT = 100
-
-
-def _error_summary(exc: Exception) -> str:
-    """将异常压缩为适合弹窗展示的简短摘要.
-
-    Args:
-        exc: 捕获到的异常实例.
-
-    Returns:
-        截断到 ``_ERROR_SUMMARY_LIMIT`` 字符以内的错误描述.
-    """
-    text = str(exc) or exc.__class__.__name__
-    text = ' '.join(text.split())
-    if len(text) > _ERROR_SUMMARY_LIMIT:
-        return text[:_ERROR_SUMMARY_LIMIT] + '…'
-    return text
-
 
 class OperationPanel:
-    """操作面板, 管理数据源选择、目标平台、行业参数与任务调度.
+    """操作面板, 管理数据源选择、行业参数与任务调度.
 
     支持"一键全自动"与"分步执行"两种模式. 一键模式执行完整
     爬取-上传流水线; 分步模式将爬取与上传拆为两步, 中间结果
-    缓存在 ``_cached_files`` 中. 上传目标平台可在阿里云百炼
-    与火山引擎 VikingDB 之间切换, 一次执行只对齐一个平台.
+    缓存在 ``_cached_files`` 中. 上传目标平台由外部经
+    ``set_platform`` 注入, 一次执行只对齐一个平台.
 
     Attributes:
         _store: GUI 配置持久化存储实例.
         _log_panel: 日志面板, 用于启停日志捕获.
         _running: 后台任务是否正在运行.
+        _platform: 外部注入的目标平台标识 (aliyun/volc).
         _cached_files: 分步模式下爬取阶段缓存的文件清单.
         _container: 面板根容器, 供后台任务恢复 UI 上下文.
     """
@@ -106,11 +69,11 @@ class OperationPanel:
         self._store = config_store
         self._log_panel = log_panel
         self._running: bool = False
+        self._platform: str = 'aliyun'
         self._cached_files: dict[str, list[dict[str, Any]]] = {}
 
         # UI 引用 (在 _build_ui 中赋值)
         self._source_select: ui.select | None = None
-        self._platform_select: ui.select | None = None
         self._industry_input: ui.input | None = None
         self._mode_toggle: ui.toggle | None = None
         self._auto_row: ui.row | None = None
@@ -134,67 +97,16 @@ class OperationPanel:
         """
         return self._running
 
-    def on_platform_change(
-        self,
-        handler: Callable[[str], None],
-    ) -> None:
-        """注册目标平台切换回调.
+    def set_platform(self, platform: str) -> None:
+        """由外部全局平台下拉注入目标平台标识.
 
-        供外部 (如 main.py) 将平台选择与其他面板联动,
-        避免外部直接引用本平台下拉控件.
+        仅更新存值, 不影响运行中任务: 已启动任务的
+        平台值在回调时快照传入, 不受后续切换影响.
 
         Args:
-            handler: 接收新平台标识 (aliyun/volc) 的回调.
+            platform: 平台标识 (aliyun/volc).
         """
-
-        def _dispatch(
-            event: ValueChangeEventArguments[str],
-        ) -> None:
-            """将平台变更事件转发给注册的回调.
-
-            ui.select 的前端仅发出 update:model-value 事件,
-            由 ValueElement 转化为 on_value_change 回调,
-            故不使用 DOM 级 on('change') 监听 (该事件类型
-            不会触发).
-
-            Args:
-                event: NiceGUI 值变更事件对象, 含 ``value``
-                    属性为新选中的平台标识.
-            """
-            value = event.value
-            handler(str(value or 'aliyun'))
-
-        if self._platform_select is not None:
-            self._platform_select.on_value_change(_dispatch)
-
-    # --------------------------------------------------
-    # 后台任务安全的 UI 反馈
-    # --------------------------------------------------
-    def _safe_notify(
-        self,
-        message: str,
-        type: str | None = None,
-    ) -> None:
-        """在后台任务上下文中安全调用 ``ui.notify``.
-
-        ``ui.notify`` 依赖当前 asyncio 任务的槽位栈解析
-        客户端, 而 ``background_tasks.create`` 启动的任务
-        槽位栈为空, 直接调用会抛 RuntimeError. 此处先
-        进入面板根容器槽位恢复客户端上下文; 通知本身
-        失败时仅记录日志, 不掩盖流水线结果.
-
-        Args:
-            message: 通知正文.
-            type: 通知类型 (positive/negative/warning 等).
-        """
-        try:
-            if self._container is not None:
-                with self._container:
-                    ui.notify(message, type=type)
-            else:
-                ui.notify(message, type=type)
-        except Exception:
-            logger.exception('界面通知发送失败: {}', message)
+        self._platform = platform
 
     # --------------------------------------------------
     # UI 构建
@@ -214,13 +126,6 @@ class OperationPanel:
                 label='数据源',
                 value='sse',
                 on_change=self._on_source_change,
-            ).classes('w-full')
-
-            # 目标平台选择 (一次执行只对齐一个平台)
-            self._platform_select = ui.select(
-                options=_PLATFORM_OPTIONS,
-                label='目标平台',
-                value='aliyun',
             ).classes('w-full')
 
             # 行业参数
@@ -320,7 +225,7 @@ class OperationPanel:
         # 平台值在回调时读取快照传入后台任务, 避免
         # 任务期间 UI 值变化影响本次执行.
         platform = self._current_platform()
-        missing = self._missing_config_items(platform)
+        missing = missing_config_items(self._store, platform)
         if missing:
             logger.warning(
                 '一键执行被拦截: 缺少配置项 {}', missing
@@ -361,7 +266,7 @@ class OperationPanel:
             return
         # 平台值在回调时读取快照传入后台任务.
         platform = self._current_platform()
-        missing = self._missing_config_items(platform)
+        missing = missing_config_items(self._store, platform)
         if missing:
             logger.warning(
                 '上传对齐被拦截: 缺少配置项 {}', missing
@@ -403,11 +308,14 @@ class OperationPanel:
                 await self._upload_single(
                     source, files, platform
                 )
-            self._safe_notify('执行完成', type='positive')
+            safe_notify(
+                self._container, '执行完成', type='positive'
+            )
         except Exception as exc:
             logger.exception('一键爬取上传执行失败')
-            self._safe_notify(
-                f'执行失败: {_error_summary(exc)}',
+            safe_notify(
+                self._container,
+                f'执行失败: {error_summary(exc)}',
                 type='negative',
             )
         finally:
@@ -440,13 +348,16 @@ class OperationPanel:
                     source, industry
                 )
                 self._cached_files = {source: files}
-            self._safe_notify(
-                '采集完成, 可执行上传对齐', type='positive'
+            safe_notify(
+                self._container,
+                '采集完成, 可执行上传对齐',
+                type='positive',
             )
         except Exception as exc:
             logger.exception('文件清单采集失败')
-            self._safe_notify(
-                f'采集失败: {_error_summary(exc)}',
+            safe_notify(
+                self._container,
+                f'采集失败: {error_summary(exc)}',
                 type='negative',
             )
         finally:
@@ -465,11 +376,16 @@ class OperationPanel:
         self._log_panel.start_capture()
         try:
             await self._upload_all(self._cached_files, platform)
-            self._safe_notify('上传对齐完成', type='positive')
+            safe_notify(
+                self._container,
+                '上传对齐完成',
+                type='positive',
+            )
         except Exception as exc:
             logger.exception('上传对齐执行失败')
-            self._safe_notify(
-                f'上传失败: {_error_summary(exc)}',
+            safe_notify(
+                self._container,
+                f'上传失败: {error_summary(exc)}',
                 type='negative',
             )
         finally:
@@ -479,52 +395,12 @@ class OperationPanel:
     # 配置校验
     # --------------------------------------------------
     def _current_platform(self) -> str:
-        """读取目标平台下拉当前值, 组件未就绪时回退阿里云.
+        """读取外部注入的目标平台标识.
 
         Returns:
             平台标识 (aliyun/volc).
         """
-        if self._platform_select is None:
-            return 'aliyun'
-        return str(self._platform_select.value or 'aliyun')
-
-    def _missing_config_items(
-        self, platform: str
-    ) -> list[str]:
-        """按目标平台检查已保存配置中的必填项.
-
-        Args:
-            platform: 目标平台标识 (aliyun/volc).
-
-        Returns:
-            缺失的必填配置项展示名列表, 空列表表示均已配置.
-        """
-        data = self._store.load()
-        if platform == 'volc':
-            raw = data.get('viking_knowledge', {})
-            volc_data = raw if isinstance(raw, dict) else {}
-            missing: list[str] = []
-            for key, label in _VOLC_REQUIRED_FIELDS:
-                value = volc_data.get(key)
-                if not str(value or '').strip():
-                    missing.append(label)
-            resource_id = str(
-                volc_data.get('resource_id') or ''
-            ).strip()
-            collection_name = str(
-                volc_data.get('collection_name') or ''
-            ).strip()
-            if not resource_id and not collection_name:
-                missing.append('Resource ID 或 Collection Name')
-            return missing
-        raw = data.get('aliyun_knowledge', {})
-        ak_data = raw if isinstance(raw, dict) else {}
-        missing = []
-        for key, label in _ALIYUN_REQUIRED_FIELDS:
-            value = ak_data.get(key)
-            if not str(value or '').strip():
-                missing.append(label)
-        return missing
+        return self._platform
 
     # --------------------------------------------------
     # 爬取逻辑
@@ -639,7 +515,7 @@ class OperationPanel:
             files_map: 以数据源标识为 key、文件清单为 value.
             platform: 目标平台标识 (aliyun/volc).
         """
-        platform_name = _PLATFORM_OPTIONS.get(platform, platform)
+        platform_name = PLATFORM_OPTIONS.get(platform, platform)
         for source, files in files_map.items():
             logger.info(
                 '开始上传到 {} | 数据源: {}', platform_name, source
@@ -660,7 +536,7 @@ class OperationPanel:
             files: 文件清单列表.
             platform: 目标平台标识 (aliyun/volc).
         """
-        platform_name = _PLATFORM_OPTIONS.get(platform, platform)
+        platform_name = PLATFORM_OPTIONS.get(platform, platform)
         logger.info(
             '开始上传到 {} | 数据源: {}', platform_name, source
         )

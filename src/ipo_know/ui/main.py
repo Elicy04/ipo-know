@@ -9,12 +9,16 @@ import sys
 from pathlib import Path
 
 from nicegui import ui
+from nicegui.events import ValueChangeEventArguments
 
 from ipo_know.config.logger import setup_logging
+from ipo_know.ui.chat_panel import ChatPanel
 from ipo_know.ui.config_panel import ConfigPanel
 from ipo_know.ui.config_store import GUIConfigStore
 from ipo_know.ui.log_panel import LogPanel
 from ipo_know.ui.operation_panel import OperationPanel
+from ipo_know.ui.platform import PLATFORM_OPTIONS
+from ipo_know.ui.search_panel import SearchPanel
 
 
 logger = logging.getLogger(__name__)
@@ -206,48 +210,113 @@ def main() -> None:
 
     @ui.page('/')
     def index() -> None:
-        """主页面布局: 上方左右分栏 + 底部全宽日志."""
+        """主页面布局: 页签栏与全局平台选择同行 + 五页签."""
         # 全局深色模式, 须在任何 UI 元素创建之前启用
         ui.dark_mode(True)
 
         operation_panel_ref: list[OperationPanel] = []
 
-        # 先创建容器骨架（保证 DOM 顺序正确）
+        # 容器骨架: 顶部行 (页签栏 + 平台选择) → 页签面板区
         with ui.column().classes('w-full'):
-            # wrap=False: w-1/3 + w-2/3 + gap 超过 100% 会触发
-            # flex 换行, 导致右栏落到左栏下方
-            with ui.row(wrap=False).classes(
-                'w-full gap-4 items-start'
+            tabs_col = ui.column().classes('w-full')
+
+        # 填充页签区: 平台配置 / 数据同步 / 知识检索 /
+        # 知识问答 / 运行日志
+        with tabs_col:
+            # 页签栏与全局平台选择同行呈现: 页签 flex-1
+            # 占主宽度居左 (min-w-0 允许收缩, 防溢出),
+            # 平台选择靠右且垂直居中; 窗口缩窄时
+            # flex-wrap 允许整体换行, 避免重叠
+            with ui.row().classes(
+                'w-full items-center gap-2 flex-wrap'
             ):
-                left_col = ui.column().classes('w-1/3')
-                right_col = ui.column().classes('w-2/3')
-            bottom_col = ui.column().classes('w-full')
-
-        # 填充底部: 日志面板（需要先创建供操作面板引用）
-        with bottom_col:
-            log_panel = LogPanel()
-            log_panel.start_capture()
-
-        # 填充左侧: 配置面板
-        with left_col:
-            config_panel = ConfigPanel(
-                config_store=config_store,
-                is_running=lambda: (
-                    bool(operation_panel_ref)
-                    and operation_panel_ref[0].is_running()
-                ),
-            )
-
-        # 填充右侧: 操作面板
-        with right_col:
-            operation_panel = OperationPanel(
-                config_store=config_store,
-                log_panel=log_panel,
-            )
+                with ui.tabs().classes('flex-1 min-w-0') as tabs:
+                    tab_config = ui.tab(
+                        'config', label='平台配置', icon='settings'
+                    )
+                    tab_sync = ui.tab(
+                        'sync', label='数据同步', icon='sync'
+                    )
+                    tab_search = ui.tab(
+                        'search', label='知识检索', icon='search'
+                    )
+                    tab_chat = ui.tab(
+                        'chat', label='知识问答', icon='chat'
+                    )
+                    tab_log = ui.tab(
+                        'log', label='运行日志', icon='terminal'
+                    )
+                # 全局目标平台选择 (单点驱动各面板),
+                # 与页签栏同行靠右
+                ui.label('目标平台').classes(
+                    'font-medium whitespace-nowrap'
+                )
+                platform_select = ui.select(
+                    options=PLATFORM_OPTIONS,
+                    value='aliyun',
+                ).classes('w-64')
+            # keep_alive 显式写出: 切页签不销毁 DOM,
+            # 现有 timer/日志不受影响
+            with ui.tab_panels(
+                tabs, value=tab_config, keep_alive=True
+            ).classes('w-full'):
+                # 日志面板须先于操作/检索/问答面板创建
+                # (供其构造引用), 故在页签容器内最先实例化;
+                # 页签显示按 value 切换 (v-show), 与面板
+                # DOM 顺序无关, 仍置于最后一个页签.
+                # 构造时即注册 sink 与刷新定时器,
+                # 不依赖页签可见性; 启动时立即开始捕获
+                with ui.tab_panel(tab_log):
+                    log_panel = LogPanel()
+                    log_panel.start_capture()
+                with ui.tab_panel(tab_config):
+                    config_panel = ConfigPanel(
+                        config_store=config_store,
+                        is_running=lambda: (
+                            bool(operation_panel_ref)
+                            and operation_panel_ref[0].is_running()
+                        ),
+                    )
+                with ui.tab_panel(tab_sync):
+                    operation_panel = OperationPanel(
+                        config_store=config_store,
+                        log_panel=log_panel,
+                    )
+                with ui.tab_panel(tab_search):
+                    search_panel = SearchPanel(
+                        config_store=config_store,
+                        log_panel=log_panel,
+                    )
+                with ui.tab_panel(tab_chat):
+                    chat_panel = ChatPanel(
+                        config_store=config_store,
+                        log_panel=log_panel,
+                    )
         operation_panel_ref.append(operation_panel)
 
-        # 联动: 目标平台切换时显隐对应平台配置卡片
-        operation_panel.on_platform_change(config_panel.set_platform)
+        # 全局平台切换单点驱动四个面板
+        def _on_platform_change(
+            event: ValueChangeEventArguments,
+        ) -> None:
+            """将全局平台选择分发给各面板.
+
+            Args:
+                event: 下拉值变更事件, value 为新平台标识.
+            """
+            value = str(event.value or 'aliyun')
+            config_panel.set_platform(value)
+            operation_panel.set_platform(value)
+            search_panel.set_platform(value)
+            chat_panel.set_platform(value)
+
+        platform_select.on_value_change(_on_platform_change)
+        # on_value_change 不对 select 初始值触发, 须显式做一次
+        # 初始广播, 避免各面板依赖硬编码默认平台 (隐性耦合)
+        initial_platform = str(platform_select.value or 'aliyun')
+        config_panel.set_platform(initial_platform)
+        operation_panel.set_platform(initial_platform)
+        search_panel.set_platform(initial_platform)
+        chat_panel.set_platform(initial_platform)
 
     # favicon 传本地 Path: NiceGUI 会以 FileResponse 挂载到
     # /favicon.ico; 传字符串路径会落入 data-URL 分支而失效
