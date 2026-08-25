@@ -23,36 +23,20 @@
 ```
 ipo-know/
 ├── ipo-know.exe      # 主程序（双击启动）
-├── .env              # 配置文件（首次运行前按需编辑）
-├── data/             # 本地数据库与下载缓存（运行时自动创建）
-├── logs/             # 运行日志（运行时自动创建）
+├── data/             # 配置文件和数据库存储位置（自动创建）
+│   ├── config.json   # GUI 配置 + API Key
+│   └── ipo_know.db   # SQLite 数据库
+├── logs/             # 运行日志（自动创建）
+│   └── app.log
 └── _internal/        # 运行时依赖（勿修改）
 ```
 
-3. 首次启动前，用文本编辑器打开 `.env`，填入所需的 RAG 平台凭证（见下方配置说明）
-4. 双击 `ipo-know.exe` 即可启动 GUI
+3. 双击 `ipo-know.exe` 即可启动 GUI
+4. 在 GUI 的**配置面板**中填写 RAG 平台凭证，点击「保存」即生效
 
 ### 配置说明
 
-配置通过 `.env` 文件管理（基于 pydantic-settings），主要变量：
-
-```ini
-# ── 火山引擎 VikingDB ──
-VOLC_AK=              # Access Key
-VOLC_SK=              # Secret Key
-VOLC_KB_ID=           # 知识库 ID
-
-# ── 阿里云百炼 ──
-ALIYUN_AK=            # AccessKey ID
-ALIYUN_SK=            # AccessKey Secret
-ALIYUN_WORKSPACE_ID=  # 业务空间 ID
-ALIYUN_INDEX_ID=      # 知识库索引 ID
-
-# ── 数据库（可选）──
-IPO_KNOW__DATABASE_PATH=  # 自定义 SQLite 路径，留空使用默认 data/ipo_know.db
-```
-
-启动后也可在 GUI 的**配置面板**中直接编辑各项参数，保存后即时生效。
+所有配置项通过 GUI 的**配置面板**管理，支持火山引擎和阿里云两套 RAG 平台。
 
 ### 爬虫目标数据源
 

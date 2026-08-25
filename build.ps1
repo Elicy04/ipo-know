@@ -259,20 +259,8 @@ Copy-Item $GitKeep (Join-Path $LogsDir '.gitkeep') -ErrorAction SilentlyContinue
 # 清理临时提示文件
 Remove-Item $GitKeep -ErrorAction SilentlyContinue
 
-# 6. 复制 .env 到产物目录（便携版需要 .env 与 exe 同目录）
-$EnvSource = Join-Path $ProjectRoot '.env'
-$EnvTarget = Join-Path $DistDir '.env'
-if (Test-Path $EnvSource) {
-    Copy-Item -Path $EnvSource -Destination $EnvTarget -Force
-    Write-Host "  .env: 已复制 ($EnvTarget)"
-} else {
-    $ExampleTarget = Join-Path $DistDir '.env.example'
-    if (-not (Test-Path $ExampleTarget)) {
-        Set-Content -Path $ExampleTarget -Value '' -Encoding UTF8
-    }
-    Write-Host "  .env: 源文件不存在，已创建空 .env.example ($ExampleTarget)" -ForegroundColor Yellow
-}
-
+# 6. 验证数据目录创建成功
+Write-Host "  ✓ 预创建 data/ 和 logs/ 目录" -ForegroundColor Green
 Write-Host ''
 Write-Host '==============================================' -ForegroundColor Green
 Write-Host ' 构建成功!' -ForegroundColor Green

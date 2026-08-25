@@ -102,9 +102,7 @@ class VikingKnowledgeClient:
         if self._client is None:
             if not self._config.ak or not self._config.sk:
                 raise ValueError(
-                    '火山知识库 AK/SK 未配置, 请在 .env 中设置 '
-                    'IPO_KNOW_VIKING_KNOWLEDGE__AK 与 '
-                    'IPO_KNOW_VIKING_KNOWLEDGE__SK'
+                    '火山知识库 AK/SK 未配置，请通过 GUI 配置填写'
                 )
             auth = IAM(ak=self._config.ak, sk=self._config.sk)
             self._client = VikingKnowledge(
@@ -279,9 +277,7 @@ class VikingKnowledgeClient:
         """
         if not self._config.ak or not self._config.sk:
             raise ValueError(
-                '火山知识库 AK/SK 未配置, 请在 .env 中设置 '
-                'IPO_KNOW_VIKING_KNOWLEDGE__AK 与 '
-                'IPO_KNOW_VIKING_KNOWLEDGE__SK'
+                '火山知识库 AK/SK 未配置，请通过 GUI 配置填写'
             )
         if not self._config.resource_id and not self._config.collection_name:
             raise ValueError(
