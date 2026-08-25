@@ -19,6 +19,9 @@ dist/
 *.sqlite
 *.sqlite3
 
+# 便携版数据目录 (数据库/配置/映射)
+/data/
+
 # Cache
 download_cache/
 output/
