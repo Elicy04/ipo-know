@@ -217,8 +217,13 @@ def main() -> None:
         operation_panel_ref: list[OperationPanel] = []
 
         # 容器骨架: 顶部行 (页签栏 + 平台选择) → 页签面板区
-        with ui.column().classes('w-full'):
-            tabs_col = ui.column().classes('w-full')
+        # 根列 h-screen 占满视口, 逐级 flex-1 传导高度,
+        # 供运行日志页签填满剩余空间 (内部滚动,
+        # 不产生外层页面滚动条)
+        with ui.column().classes('w-full h-screen'):
+            tabs_col = ui.column().classes(
+                'w-full flex-1 min-h-0'
+            )
 
         # 填充页签区: 平台配置 / 数据同步 / 知识检索 /
         # 知识问答 / 运行日志
@@ -256,17 +261,19 @@ def main() -> None:
                     value='aliyun',
                 ).classes('w-64')
             # keep_alive 显式写出: 切页签不销毁 DOM,
-            # 现有 timer/日志不受影响
+            # 现有 timer/日志不受影响; flex-1 填满
+            # 页签栏之外的剩余高度
             with ui.tab_panels(
                 tabs, value=tab_config, keep_alive=True
-            ).classes('w-full'):
+            ).classes('w-full flex-1 min-h-0'):
                 # 日志面板须先于操作/检索/问答面板创建
                 # (供其构造引用), 故在页签容器内最先实例化;
                 # 页签显示按 value 切换 (v-show), 与面板
                 # DOM 顺序无关, 仍置于最后一个页签.
                 # 构造时即注册 sink 与刷新定时器,
-                # 不依赖页签可见性; 启动时立即开始捕获
-                with ui.tab_panel(tab_log):
+                # 不依赖页签可见性; 启动时立即开始捕获;
+                # h-full 使日志面板填满页签内容区
+                with ui.tab_panel(tab_log).classes('h-full'):
                     log_panel = LogPanel()
                     log_panel.start_capture()
                 with ui.tab_panel(tab_config):
@@ -287,7 +294,15 @@ def main() -> None:
                         config_store=config_store,
                         log_panel=log_panel,
                     )
-                with ui.tab_panel(tab_chat):
+                with ui.tab_panel(tab_chat).classes(
+                    # Quasar q-tab-panel 默认 overflow:auto,
+                    # 问答页签内部消息区已有自己的垂直滚动
+                    # (q-scroll-area), 外层滚动条多余, 仅
+                    # 问答页签覆盖 overflow-y-hidden; 其余页签
+                    # (配置/同步/检索/日志) 保留默认行为;
+                    # 高度链由 flex-1/h-full 传导, 不受影响
+                    'overflow-y-hidden'
+                ):
                     chat_panel = ChatPanel(
                         config_store=config_store,
                         log_panel=log_panel,

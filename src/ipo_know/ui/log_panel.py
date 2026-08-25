@@ -58,22 +58,31 @@ class LogPanel:
     """
 
     def __init__(self) -> None:
-        """初始化日志面板, 创建 UI 组件并启动刷新定时器."""
+        """初始化日志面板, 创建 UI 组件并启动刷新定时器.
+
+        根容器填满所在页签内容区 (h-full): 顶部工具行
+        固定高度 (shrink-0), 日志滚动区 flex-1 填满剩余
+        高度并内部滚动 (覆盖 nicegui-log 默认 16rem).
+        """
         self._queue: asyncio.Queue[LogEntry] = asyncio.Queue()
         self._sink_id: int | None = None
-        with ui.row().classes(
-            'w-full items-center justify-between gap-2'
-        ):
-            ui.label('运行日志').classes('text-base font-medium')
-            ui.button(
-                icon='delete',
-                on_click=self.clear,
-            ).props('dense flat').classes('text-xs')
-        self._log = (
-            ui.log(max_lines=500)
-            .classes('w-full h-64 select-text')
-            .style(_SELECT_STYLE)
-        )
+        with ui.column().classes('w-full h-full gap-2'):
+            with ui.row().classes(
+                'w-full shrink-0 items-center '
+                'justify-between gap-2'
+            ):
+                ui.label('运行日志').classes(
+                    'text-base font-medium'
+                )
+                ui.button(
+                    icon='delete',
+                    on_click=self.clear,
+                ).props('dense flat').classes('text-xs')
+            self._log = (
+                ui.log(max_lines=500)
+                .classes('w-full flex-1 min-h-0 select-text')
+                .style(_SELECT_STYLE)
+            )
         ui.timer(0.1, self._flush)
 
     def _sink(self, message: object) -> None:

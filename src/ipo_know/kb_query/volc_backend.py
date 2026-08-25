@@ -127,6 +127,10 @@ class VolcQueryBackend:
             error (流内异常描述).
         """
         if not self._service_resource_id:
+            logger.warning(
+                '火山问答前置校验失败 | reason=缺少 '
+                'service_resource_id',
+            )
             yield ChatStreamEvent(
                 kind='error',
                 payload=(

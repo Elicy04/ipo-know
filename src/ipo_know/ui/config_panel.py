@@ -3,8 +3,14 @@
 提供阿里云百炼与火山引擎 VikingDB 知识库连接参数的
 可视化编辑界面, 支持保存到本地 JSON 配置、连通性测试,
 并按操作面板的目标平台选择联动显隐对应配置卡片.
+
+每平台按功能拆分为四张纵向排列的独立卡片: 基本配置 /
+同步配置 / 检索配置 / 问答配置, 卡片风格统一; 每卡底部
+提供独立的"保存配置"按钮 (保存粒度仍为整平台段:
+load→替换段→整份 save).
 """
 
+import functools
 import webbrowser
 from collections.abc import Callable
 
@@ -94,23 +100,26 @@ def _normalized_timeout(value: object) -> int:
 class ConfigPanel:
     """知识库平台配置编辑面板 (阿里云 + 火山引擎).
 
-    以 NiceGUI ui.card 为容器, 竖排展示两个平台的配置卡片,
-    卡片内部按功能分区 (基本配置/同步配置/检索配置/问答
-    配置): 基本配置收纳各功能共有项, 阿里云的 endpoint/
-    region_id 低频项折叠在基本配置内的"高级配置"中;
-    各卡片标题行右侧提供独立的"连通性测试"按钮, 卡片
-    底部提供一个"保存配置"按钮 (整卡全分区一次保存,
-    仅保存本平台段), 保存按钮下方提供"打开知识库控制台"
-    快捷跳转按钮 (与后台任务无关, 始终可用). 两卡片按
-    全局目标平台联动显隐.
+    外层容器内按平台分组, 每组四张纵向排列的独立卡片
+    (基本配置/同步配置/检索配置/问答配置): 基本配置收纳
+    各功能共有项, 低频连接参数折叠在基本配置卡内的
+    "高级配置"中; 基本配置卡保存按钮下方依次提供"连通性
+    测试"与"打开知识库控制台"按钮; 其余各卡底部各有一个
+    独立的"保存配置"按钮. 每卡保存粒度均为整平台段
+    (load→替换段→整份 save), 保存行为不随按钮拆分变化.
+    两组卡片按全局目标平台联动显隐.
 
     Attributes:
         _store: GUI 配置持久化存储实例.
         _is_running: 判断是否有后台任务正在执行的回调.
         _fields: 阿里云表单输入组件字典, key 为配置字段名.
         _volc_fields: 火山引擎表单输入组件字典.
-        _aliyun_card: 阿里云配置卡片根容器.
-        _volc_card: 火山引擎配置卡片根容器.
+        _save_btns: 全部保存按钮列表 (每卡一个, 双平台
+            共八个), 供统一灰化管理.
+        _test_btn: 阿里云连通性测试按钮.
+        _volc_test_btn: 火山引擎连通性测试按钮.
+        _aliyun_wrap: 阿里云四卡分组容器, 联动显隐单元.
+        _volc_wrap: 火山引擎四卡分组容器, 联动显隐单元.
         _testing: 阿里云连通性测试后台任务是否进行中.
         _volc_testing: 火山引擎连通性测试后台任务是否进行中.
         _container: 面板根容器, 供后台任务恢复 UI 上下文.
@@ -131,12 +140,11 @@ class ConfigPanel:
         self._is_running = is_running
         self._fields: dict[str, ui.input | ui.number] = {}
         self._volc_fields: dict[str, ui.input | ui.number] = {}
-        self._aliyun_save_btn: ui.button | None = None
-        self._volc_save_btn: ui.button | None = None
+        self._save_btns: list[ui.button] = []
         self._test_btn: ui.button | None = None
         self._volc_test_btn: ui.button | None = None
-        self._aliyun_card: ui.card | None = None
-        self._volc_card: ui.card | None = None
+        self._aliyun_wrap: ui.column | None = None
+        self._volc_wrap: ui.column | None = None
         self._testing: bool = False
         self._volc_testing: bool = False
         self._container: ui.card | None = None
@@ -149,62 +157,91 @@ class ConfigPanel:
     # 公开接口
     # --------------------------------------------------
     def set_platform(self, platform: str) -> None:
-        """按目标平台联动显隐两个平台的配置卡片.
+        """按目标平台联动显隐两个平台的配置卡片组.
 
         卡片内部折叠区展开状态随容器整体隐藏保留, 切回
         平台时不重置.
 
         Args:
             platform: 平台标识 (aliyun/volc). 值为 'aliyun'
-                时显示阿里云卡片, 否则显示火山引擎卡片.
+                时显示阿里云四卡, 否则显示火山引擎四卡.
         """
         show_aliyun = platform != 'volc'
-        if self._aliyun_card is not None:
-            self._aliyun_card.visible = show_aliyun
-        if self._volc_card is not None:
-            self._volc_card.visible = not show_aliyun
+        if self._aliyun_wrap is not None:
+            self._aliyun_wrap.visible = show_aliyun
+        if self._volc_wrap is not None:
+            self._volc_wrap.visible = not show_aliyun
 
     # --------------------------------------------------
     # UI 构建
     # --------------------------------------------------
     @staticmethod
-    def _section_header(title: str) -> None:
-        """渲染功能分区标题: 分隔线 + 分区名.
+    def _card_title(title: str) -> None:
+        """渲染卡片标题.
 
         Args:
-            title: 分区标题文本.
+            title: 卡片标题文本.
         """
-        ui.separator().classes('mt-3')
-        ui.label(title).classes('text-base font-medium mt-1')
+        ui.label(title).classes('text-base font-bold')
+
+    def _save_button(
+        self,
+        section: str,
+        platform_name: str,
+        card_name: str,
+    ) -> None:
+        """在卡片底部创建独立"保存配置"按钮.
+
+        按钮回调以 partial 绑定卡名, 保存粒度仍为整平台
+        段, 通知文案标注触发保存的卡片.
+
+        Args:
+            section: 配置段键名 (aliyun_knowledge /
+                viking_knowledge).
+            platform_name: 平台展示名, 用于通知文案.
+            card_name: 卡片名, 用于通知文案.
+        """
+        btn = ui.button(
+            '保存配置',
+            on_click=functools.partial(
+                self._on_save_card, section,
+                platform_name, card_name,
+            ),
+            icon='save',
+        ).classes('w-full')
+        self._save_btns.append(btn)
 
     def _build_ui(self) -> None:
-        """构建面板 UI 布局."""
+        """构建面板 UI 布局: 根容器 + 两平台四卡分组."""
         container = ui.card().classes('w-full p-4 gap-2')
         self._container = container
-        self._aliyun_card = container
         with container:
-            # 标题行: 左侧标题, 右侧连通性测试按钮
-            with ui.row().classes(
-                'w-full items-center mb-2 gap-2'
-            ):
-                ui.label('阿里云百炼配置').classes(
-                    'text-lg font-bold'
-                )
-                self._test_btn = ui.button(
-                    '连通性测试',
-                    on_click=self._on_test_connection,
-                    icon='network_check',
-                ).props('dense outline').classes('ml-auto')
+            with ui.column().classes(
+                'w-full gap-2'
+            ) as aliyun_wrap:
+                self._aliyun_wrap = aliyun_wrap
+                self._build_aliyun_cards()
+            with ui.column().classes(
+                'w-full gap-2'
+            ) as volc_wrap:
+                self._volc_wrap = volc_wrap
+                self._build_volc_cards()
+        # 定时刷新保存/测试按钮的灰化状态
+        ui.timer(0.5, self._refresh_btn_states)
 
-            # 分区一: 基本配置 (各功能共有项)
-            self._section_header('基本配置')
+    def _build_aliyun_cards(self) -> None:
+        """构建阿里云四张配置卡片 (纵排)."""
+        # 卡一: 基本配置 (主字段 + 高级折叠 + 测试/跳转)
+        with ui.card().classes('w-full p-4 gap-2'):
+            self._card_title('基本配置')
             self._fields['ak'] = (
                 ui.input(label='AK (AccessKey ID)')
                 .classes('w-full')
                 .tooltip('阿里云 AccessKey ID')
             )
             self._fields['sk'] = (
-                ui.input(label='SK (AccessKey Secret)', password=True)
+                ui.input(label='SK (AccessKey Secret)',
+                         password=True)
                 .classes('w-full')
                 .tooltip('阿里云 AccessKey Secret')
             )
@@ -218,12 +255,6 @@ class ConfigPanel:
                 .classes('w-full')
                 .tooltip('知识库索引 ID')
             )
-            self._fields['timeout'] = (
-                ui.number(label='Timeout (秒)', value=30, min=1)
-                .classes('w-full')
-                .tooltip('API 请求超时时间(秒)')
-            )
-
             # 低频连接参数折叠到高级配置, 默认收起
             with ui.expansion('高级配置').classes('w-full'):
                 self._fields['endpoint'] = (
@@ -236,9 +267,30 @@ class ConfigPanel:
                     .classes('w-full')
                     .tooltip('阿里云区域标识, 如 cn-beijing')
                 )
+                self._fields['timeout'] = (
+                    ui.number(
+                        label='Timeout (秒)', value=30, min=1
+                    )
+                    .classes('w-full')
+                    .tooltip('API 请求超时时间(秒)')
+                )
+            self._save_button(
+                'aliyun_knowledge', '阿里云', '基本配置'
+            )
+            self._test_btn = ui.button(
+                '连通性测试',
+                on_click=self._on_test_connection,
+                icon='network_check',
+            ).props('outline').classes('w-full')
+            ui.button(
+                '打开知识库控制台',
+                on_click=self._open_aliyun_console,
+                icon='open_in_new',
+            ).props('outline').classes('w-full')
 
-            # 分区二: 同步配置
-            self._section_header('同步配置')
+        # 卡二: 同步配置
+        with ui.card().classes('w-full p-4 gap-2'):
+            self._card_title('同步配置')
             self._fields['category_id'] = (
                 ui.input(label='Category ID')
                 .classes('w-full')
@@ -249,15 +301,23 @@ class ConfigPanel:
                 .classes('w-full')
                 .tooltip('文档解析器, 如 DASHSCOPE_DOCMIND')
             )
+            self._save_button(
+                'aliyun_knowledge', '阿里云', '同步配置'
+            )
 
-            # 分区三: 检索配置 (本期无专属项, 文案占位)
-            self._section_header('检索配置')
+        # 卡三: 检索配置 (无专属参数, 文案占位)
+        with ui.card().classes('w-full p-4 gap-2'):
+            self._card_title('检索配置')
             ui.label(
-                '检索参数在知识检索页签查询时指定'
+                '检索复用基本配置, 无需专属参数'
             ).classes('text-sm text-gray-400')
+            self._save_button(
+                'aliyun_knowledge', '阿里云', '检索配置'
+            )
 
-            # 分区四: 问答配置
-            self._section_header('问答配置')
+        # 卡四: 问答配置
+        with ui.card().classes('w-full p-4 gap-2'):
+            self._card_title('问答配置')
             self._fields['api_key'] = (
                 ui.input(label='API Key', password=True)
                 .classes('w-full')
@@ -276,79 +336,27 @@ class ConfigPanel:
                     ' 在百炼控制台知识问答页面创建并发布后获取'
                 )
             )
+            self._save_button(
+                'aliyun_knowledge', '阿里云', '问答配置'
+            )
 
-            # 字符串输入框失焦/粘贴后即时去除首尾空白
-            for field in self._fields.values():
-                if isinstance(field, ui.input):
-                    field.on('change', self._on_field_change)
+        self._bind_field_change(self._fields)
 
-            with ui.row().classes('w-full mt-2 gap-2'):
-                self._aliyun_save_btn = ui.button(
-                    '保存配置',
-                    on_click=self._on_save_aliyun,
-                    icon='save',
-                ).classes('flex-1')
-
-            ui.button(
-                '打开知识库控制台',
-                on_click=self._open_aliyun_console,
-                icon='open_in_new',
-            ).props('outline').classes('w-full')
-
-        self._build_volc_ui()
-
-        # 定时刷新保存/测试按钮的灰化状态
-        ui.timer(0.5, self._refresh_btn_states)
-
-    def _build_volc_ui(self) -> None:
-        """构建火山引擎 VikingDB 配置卡片."""
-        volc_card = ui.card().classes('w-full p-4 gap-2')
-        self._volc_card = volc_card
-        with volc_card:
-            # 标题行: 左侧标题, 右侧连通性测试按钮
-            with ui.row().classes(
-                'w-full items-center mb-2 gap-2'
-            ):
-                ui.label('火山引擎 VikingDB 配置').classes(
-                    'text-lg font-bold'
-                )
-                self._volc_test_btn = ui.button(
-                    '连通性测试',
-                    on_click=self._on_test_volc_connection,
-                    icon='network_check',
-                ).props('dense outline').classes('ml-auto')
-
-            # 分区一: 基本配置 (各功能共有项)
-            self._section_header('基本配置')
+    def _build_volc_cards(self) -> None:
+        """构建火山引擎四张配置卡片 (纵排)."""
+        # 卡一: 基本配置 (主字段 + 高级折叠 + 测试/跳转)
+        with ui.card().classes('w-full p-4 gap-2'):
+            self._card_title('基本配置')
             self._volc_fields['ak'] = (
                 ui.input(label='AK (Access Key)')
                 .classes('w-full')
                 .tooltip('火山引擎 Access Key')
             )
             self._volc_fields['sk'] = (
-                ui.input(label='SK (Secret Key)', password=True)
+                ui.input(label='SK (Secret Key)',
+                         password=True)
                 .classes('w-full')
                 .tooltip('火山引擎 Secret Key')
-            )
-            self._volc_fields['host'] = (
-                ui.input(label='Host')
-                .classes('w-full')
-                .tooltip('知识库服务域名')
-            )
-            self._volc_fields['region'] = (
-                ui.input(label='Region')
-                .classes('w-full')
-                .tooltip('服务地域, 如 cn-beijing')
-            )
-            self._volc_fields['scheme'] = (
-                ui.input(label='Scheme')
-                .classes('w-full')
-                .tooltip('请求协议, http 或 https, 默认 https')
-            )
-            self._volc_fields['timeout'] = (
-                ui.number(label='Timeout (秒)', value=30, min=1)
-                .classes('w-full')
-                .tooltip('API 请求超时时间(秒)')
             )
             self._volc_fields['resource_id'] = (
                 ui.input(label='Resource ID')
@@ -357,16 +365,54 @@ class ConfigPanel:
                     '知识库唯一 ID, 与 Collection Name 二选一'
                 )
             )
-            self._volc_fields['collection_name'] = (
-                ui.input(label='Collection Name')
-                .classes('w-full')
-                .tooltip(
-                    '知识库名称, 与 Resource ID 二选一'
+            # 低频连接参数折叠到高级配置, 默认收起
+            with ui.expansion('高级配置').classes('w-full'):
+                self._volc_fields['host'] = (
+                    ui.input(label='Host')
+                    .classes('w-full')
+                    .tooltip('知识库服务域名')
                 )
+                self._volc_fields['region'] = (
+                    ui.input(label='Region')
+                    .classes('w-full')
+                    .tooltip('服务地域, 如 cn-beijing')
+                )
+                self._volc_fields['scheme'] = (
+                    ui.input(label='Scheme')
+                    .classes('w-full')
+                    .tooltip('请求协议, http 或 https, 默认 https')
+                )
+                self._volc_fields['timeout'] = (
+                    ui.number(
+                        label='Timeout (秒)', value=30, min=1
+                    )
+                    .classes('w-full')
+                    .tooltip('API 请求超时时间(秒)')
+                )
+                self._volc_fields['collection_name'] = (
+                    ui.input(label='Collection Name')
+                    .classes('w-full')
+                    .tooltip(
+                        '知识库名称, 与 Resource ID 二选一'
+                    )
+                )
+            self._save_button(
+                'viking_knowledge', '火山引擎', '基本配置'
             )
+            self._volc_test_btn = ui.button(
+                '连通性测试',
+                on_click=self._on_test_volc_connection,
+                icon='network_check',
+            ).props('outline').classes('w-full')
+            ui.button(
+                '打开知识库控制台',
+                on_click=self._open_volc_console,
+                icon='open_in_new',
+            ).props('outline').classes('w-full')
 
-            # 分区二: 同步配置
-            self._section_header('同步配置')
+        # 卡二: 同步配置
+        with ui.card().classes('w-full p-4 gap-2'):
+            self._card_title('同步配置')
             self._volc_fields['project_name'] = (
                 ui.input(label='Project Name')
                 .classes('w-full')
@@ -380,15 +426,23 @@ class ConfigPanel:
                     ' 如 kb-strategy-xxxx'
                 )
             )
+            self._save_button(
+                'viking_knowledge', '火山引擎', '同步配置'
+            )
 
-            # 分区三: 检索配置 (本期无专属项, 文案占位)
-            self._section_header('检索配置')
+        # 卡三: 检索配置 (无专属参数, 文案占位)
+        with ui.card().classes('w-full p-4 gap-2'):
+            self._card_title('检索配置')
             ui.label(
-                '检索参数在知识检索页签查询时指定'
+                '检索复用基本配置, 无需专属参数'
             ).classes('text-sm text-gray-400')
+            self._save_button(
+                'viking_knowledge', '火山引擎', '检索配置'
+            )
 
-            # 分区四: 问答配置
-            self._section_header('问答配置')
+        # 卡四: 问答配置
+        with ui.card().classes('w-full p-4 gap-2'):
+            self._card_title('问答配置')
             self._volc_fields['service_resource_id'] = (
                 ui.input(label='知识服务 ID')
                 .classes('w-full')
@@ -405,24 +459,24 @@ class ConfigPanel:
                     ' 在火山方舟控制台获取'
                 )
             )
+            self._save_button(
+                'viking_knowledge', '火山引擎', '问答配置'
+            )
 
-            # 字符串输入框失焦/粘贴后即时去除首尾空白
-            for field in self._volc_fields.values():
-                if isinstance(field, ui.input):
-                    field.on('change', self._on_field_change)
+        self._bind_field_change(self._volc_fields)
 
-            with ui.row().classes('w-full mt-2 gap-2'):
-                self._volc_save_btn = ui.button(
-                    '保存配置',
-                    on_click=self._on_save_volc,
-                    icon='save',
-                ).classes('flex-1')
+    def _bind_field_change(
+        self,
+        fields: dict[str, ui.input | ui.number],
+    ) -> None:
+        """为字符串输入框绑定失焦/粘贴后的空白清理回调.
 
-            ui.button(
-                '打开知识库控制台',
-                on_click=self._open_volc_console,
-                icon='open_in_new',
-            ).props('outline').classes('w-full')
+        Args:
+            fields: 平台表单输入组件字典.
+        """
+        for field in fields.values():
+            if isinstance(field, ui.input):
+                field.on('change', self._on_field_change)
 
     # --------------------------------------------------
     # 数据加载 / 保存
@@ -516,27 +570,35 @@ class ConfigPanel:
         if cleaned != sender.value:
             sender.value = cleaned
 
-    def _on_save_aliyun(self) -> None:
-        """阿里云保存按钮回调: 仅保存阿里云段配置."""
-        if self._is_running() or self._testing or self._volc_testing:
-            return
-        try:
-            self._save_section(
-                'aliyun_knowledge', self._collect_aliyun_values()
-            )
-            ui.notify('配置已保存', type='positive')
-        except Exception as exc:
-            ui.notify(f'保存失败: {exc}', type='negative')
+    def _on_save_card(
+        self,
+        section: str,
+        platform_name: str,
+        card_name: str,
+    ) -> None:
+        """卡片保存按钮回调: 保存整平台段配置.
 
-    def _on_save_volc(self) -> None:
-        """火山引擎保存按钮回调: 仅保存火山引擎段配置."""
+        保存粒度仍为整平台段 (任一卡保存均落盘整段),
+        通知文案标注触发保存的卡片以便定位.
+
+        Args:
+            section: 配置段键名.
+            platform_name: 平台展示名.
+            card_name: 触发保存的卡片名.
+        """
         if self._is_running() or self._testing or self._volc_testing:
             return
+        values = (
+            self._collect_aliyun_values()
+            if section == 'aliyun_knowledge'
+            else self._collect_volc_values()
+        )
         try:
-            self._save_section(
-                'viking_knowledge', self._collect_volc_values()
+            self._save_section(section, values)
+            ui.notify(
+                f'{platform_name} · {card_name}卡配置已保存',
+                type='positive',
             )
-            ui.notify('配置已保存', type='positive')
         except Exception as exc:
             ui.notify(f'保存失败: {exc}', type='negative')
 
@@ -720,16 +782,11 @@ class ConfigPanel:
             or self._testing
             or self._volc_testing
         )
-        if self._aliyun_save_btn is not None:
+        for btn in self._save_btns:
             if busy:
-                self._aliyun_save_btn.disable()
+                btn.disable()
             else:
-                self._aliyun_save_btn.enable()
-        if self._volc_save_btn is not None:
-            if busy:
-                self._volc_save_btn.disable()
-            else:
-                self._volc_save_btn.enable()
+                btn.enable()
         if self._test_btn is not None:
             if busy:
                 self._test_btn.disable()

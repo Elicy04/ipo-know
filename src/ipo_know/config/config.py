@@ -4,11 +4,24 @@
 提供单例实例供项目各处直接导入使用.
 """
 
-import os
+import functools
 import pathlib
+import sys
 
 import pydantic
 import pydantic_settings
+
+
+@functools.cache
+def app_root() -> pathlib.Path:
+    """返回应用数据根目录.
+
+    冻结环境（PyInstaller onedir）：exe 所在目录.
+    开发环境：项目根目录（src 的父目录）.
+    """
+    if getattr(sys, 'frozen', False):
+        return pathlib.Path(sys.executable).parent
+    return pathlib.Path(__file__).resolve().parents[3]
 
 
 class DatabaseConfig(pydantic.BaseModel):
@@ -38,12 +51,8 @@ class DatabaseConfig(pydantic.BaseModel):
         if self.database_path:
             db_path = pathlib.Path(self.database_path)
         else:
-            app_data_root = os.getenv('LOCALAPPDATA')
-            if app_data_root:
-                base_dir = pathlib.Path(app_data_root) / self.app_name
-            else:
-                base_dir = pathlib.Path.home() / f'.{self.app_name}'
-            db_path = base_dir / 'database' / f'{self.app_name}.db'
+            base_dir = app_root() / 'data'
+            db_path = base_dir / f'{self.app_name}.db'
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return db_path
@@ -264,7 +273,7 @@ class Settings(pydantic_settings.BaseSettings):
     """
 
     model_config = pydantic_settings.SettingsConfigDict(
-        env_file='.env',
+        env_file=str(app_root() / '.env'),
         env_prefix='IPO_KNOW_',
         case_sensitive=False,
         env_nested_delimiter='__',

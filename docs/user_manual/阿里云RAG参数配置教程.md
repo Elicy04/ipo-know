@@ -4,7 +4,7 @@ version: "0"
 date modified: August 21st 2026, 3:25 pm
 date created: August 21st 2026, 1:45 pm
 ---
->由于安全问题，阿里云的AccessKey，业务空间ID等这里采取手动获取的办法。
+>由于安全问题，AccessKey，业务空间ID等暂时妥协于人工操作获取。
 ## 阿里云参数配置
 ### AK和SK
 获取方式如下，主要分为两步：
@@ -20,13 +20,8 @@ date created: August 21st 2026, 1:45 pm
 ### 目标知识库ID
 这里展示从创建知识库到获取知识库ID的过程：
 ![获取目标知识库ID](../_attachments/阿里云_获取目标知识库ID.gif)
-附注：创建知识库操作其实可以通过程序实现，但问题在于手动创建可以更好地确认费用情况。
-## 火山引擎参数配置
 
-### AK和SK
-![](../_attachments/火山引擎_获取AK和SK.gif)
-### Resource ID
-![](../_attachments/火山引擎_创建知识库并获取ID.gif)
+附注：创建知识库操作其实可以通过程序实现，但问题在于手动创建可以更好地确认费用情况。
 
 
 

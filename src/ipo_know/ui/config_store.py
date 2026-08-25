@@ -9,6 +9,7 @@ from loguru import logger
 
 from ipo_know.config.config import AliyunKnowledgeSettings
 from ipo_know.config.config import VikingKnowledgeSettings
+from ipo_know.config.config import app_root
 from ipo_know.config.config import settings
 
 
@@ -49,7 +50,7 @@ _DEFAULT_VIKING_KNOWLEDGE: dict[str, object] = {
 class GUIConfigStore:
     """GUI 专属配置的 JSON 持久化存储.
 
-    配置文件存放于 ``%LOCALAPPDATA%/ipo_know/config.json``,
+    配置文件存放于 ``app_root()/data/config.json``,
     与 :class:`FileMappingStore` 使用相同的存储根目录策略.
 
     Attributes:
@@ -66,12 +67,7 @@ class GUIConfigStore:
             path: 配置文件路径, 为 None 时使用默认位置.
         """
         if path is None:
-            app_data_root = os.getenv('LOCALAPPDATA')
-            if app_data_root:
-                base_dir = pathlib.Path(app_data_root) / 'ipo_know'
-            else:
-                base_dir = pathlib.Path.home() / '.ipo_know'
-            path = base_dir / 'config.json'
+            path = app_root() / 'data' / 'config.json'
         self._path = pathlib.Path(path)
 
     @property

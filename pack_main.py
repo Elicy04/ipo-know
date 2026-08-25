@@ -5,6 +5,12 @@
 """
 
 import multiprocessing
+import os
+import sys
+from pathlib import Path
+
+
+os.chdir(Path(sys.executable).parent)
 
 
 if __name__ == '__main__':
