@@ -229,7 +229,37 @@ if ($DirSizeMB -lt $MinDirSizeMB) {
 
 $FileCount = (Get-ChildItem -Path $DistDir -Recurse -File).Count
 
-# 5. 复制 .env 到产物目录（便携版需要 .env 与 exe 同目录）
+# 新增：预创建便携版目录结构（提升开箱即用体验）
+Write-Host ''
+Write-Host '[4.5/4] 预创建便携版目录结构...' -ForegroundColor Cyan
+
+$DataDir = Join-Path $DistDir 'data'
+$LogsDir = Join-Path $DistDir 'logs'
+
+# 创建 data 目录（配置文件和数据库存储位置）
+if (-not (Test-Path $DataDir)) {
+    New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+    Write-Host "  data/: 已创建 (存放 config.json 和数据库)" -ForegroundColor Green
+}
+
+# 创建 logs 目录（日志存储位置）
+if (-not (Test-Path $LogsDir)) {
+    New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
+    Write-Host "  logs/: 已创建 (存放应用程序日志)" -ForegroundColor Green
+}
+
+# 可选：为 data 和 logs 目录添加 .gitkeep 文件（确保 Git 追踪空目录）
+$GitKeep = Join-Path $ProjectRoot '.gitkeep-prompt.txt'
+if (-not (Test-Path $GitKeep)) {
+    Set-Content -Path $GitKeep -Value '# 提示：这两个目录由程序自动维护\r\n# data/ -> config.json + ipo_know.db\r\n# logs/ -> app.log' -Encoding UTF8
+}
+Copy-Item $GitKeep (Join-Path $DataDir '.gitkeep') -ErrorAction SilentlyContinue
+Copy-Item $GitKeep (Join-Path $LogsDir '.gitkeep') -ErrorAction SilentlyContinue
+
+# 清理临时提示文件
+Remove-Item $GitKeep -ErrorAction SilentlyContinue
+
+# 6. 复制 .env 到产物目录（便携版需要 .env 与 exe 同目录）
 $EnvSource = Join-Path $ProjectRoot '.env'
 $EnvTarget = Join-Path $DistDir '.env'
 if (Test-Path $EnvSource) {
@@ -240,7 +270,7 @@ if (Test-Path $EnvSource) {
     if (-not (Test-Path $ExampleTarget)) {
         Set-Content -Path $ExampleTarget -Value '' -Encoding UTF8
     }
-    Write-Host "  .env: 源文件不存在, 已创建空 .env.example ($ExampleTarget)" -ForegroundColor Yellow
+    Write-Host "  .env: 源文件不存在，已创建空 .env.example ($ExampleTarget)" -ForegroundColor Yellow
 }
 
 Write-Host ''
