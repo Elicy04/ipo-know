@@ -108,9 +108,7 @@ class AliyunKnowledgeClient:
         if self._client is None:
             if not self._config.ak or not self._config.sk:
                 raise ValueError(
-                    '百炼知识库 AK/SK 未配置, 请在 .env 中设置 '
-                    'IPO_KNOW_ALIYUN_KNOWLEDGE__AK 与 '
-                    'IPO_KNOW_ALIYUN_KNOWLEDGE__SK'
+                    '百炼知识库 AK/SK 未配置，请通过 GUI 配置填写'
                 )
             open_api_config = open_api_models.Config(
                 access_key_id=self._config.ak,
@@ -126,8 +124,7 @@ class AliyunKnowledgeClient:
         """业务空间 ID, 未配置时抛出异常提示."""
         if not self._config.workspace_id:
             raise ValueError(
-                '百炼业务空间未配置, 请在 .env 中设置 '
-                'IPO_KNOW_ALIYUN_KNOWLEDGE__WORKSPACE_ID'
+                '百炼业务空间未配置，请通过 GUI 配置填写'
             )
         return self._config.workspace_id
 
@@ -136,8 +133,7 @@ class AliyunKnowledgeClient:
         """知识库 ID, 未配置时抛出异常提示."""
         if not self._config.index_id:
             raise ValueError(
-                '百炼知识库 ID 未配置, 请在 .env 中设置 '
-                'IPO_KNOW_ALIYUN_KNOWLEDGE__INDEX_ID'
+                '百炼知识库 ID 未配置，请通过 GUI 配置填写'
             )
         return self._config.index_id
 
