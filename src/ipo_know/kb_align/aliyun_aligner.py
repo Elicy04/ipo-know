@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import pathlib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -39,6 +38,7 @@ from alibabacloud_bailian20231229 import models as bailian_models
 from loguru import logger
 
 from ipo_know.clients.aliyun_knowledge.client import AliyunKnowledgeClient
+from ipo_know.config.config import app_root
 from ipo_know.kb_align.volc_aligner import build_doc_name
 
 
@@ -135,12 +135,7 @@ class FileMappingStore:
             source: 数据来源标识, 用于生成默认映射文件名.
         """
         if path is None:
-            app_data_root = os.getenv('LOCALAPPDATA')
-            if app_data_root:
-                base_dir = pathlib.Path(app_data_root) / 'ipo_know'
-            else:
-                base_dir = pathlib.Path.home() / '.ipo_know'
-            path = base_dir / _mapping_file_name(source)
+            path = app_root() / 'data' / _mapping_file_name(source)
         self._path = pathlib.Path(path)
         self._data: dict[str, str] = {}
         self._load()

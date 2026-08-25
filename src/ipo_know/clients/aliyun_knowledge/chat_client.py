@@ -426,7 +426,15 @@ class AliyunChatClient:
             headers=headers,
             json=body,
         ) as response:
+            logger.debug(
+                '阿里云问答 HTTP 请求发起 | url={} | agent_id={}',
+                self._chat_url(), self._agent_id,
+            )
             if response.status_code != 200:
+                logger.error(
+                    '阿里云问答 HTTP 错误 | status={}',
+                    response.status_code,
+                )
                 raise await self._http_error(response)
             async for event in self._iter_events(response):
                 yield event

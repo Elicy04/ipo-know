@@ -183,6 +183,10 @@ class AliyunQueryBackend:
         if not self._agent_id:
             missing.append('知识问答服务 ID')
         if missing:
+            logger.warning(
+                '阿里云问答前置校验失败 | missing={}',
+                ' 与 '.join(missing),
+            )
             yield ChatStreamEvent(
                 kind='error',
                 payload=(
@@ -211,6 +215,10 @@ class AliyunQueryBackend:
                     stopped = True
                     break
                 if event.kind == 'error':
+                    logger.warning(
+                        '阿里云问答流内错误帧 | payload={}',
+                        event.payload,
+                    )
                     error_seen = True
                 if event.kind == 'usage':
                     usage = event.payload
