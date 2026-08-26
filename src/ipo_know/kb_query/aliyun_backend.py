@@ -94,12 +94,22 @@ class AliyunQueryBackend:
             sparse_similarity_top_k=min(limit, _MAX_TOP_K),
             rerank_top_n=min(limit, _MAX_RERANK_TOP_N),
         )
+        logger.debug(
+            '阿里云检索发起 | index_id={} | top_k={} | rerank_top_n={}',
+            self._client.index_id,
+            min(limit, _MAX_TOP_K),
+            min(limit, _MAX_RERANK_TOP_N),
+        )
         response = await self._client.retrieve(request)
         body = response.body
         nodes = (
             body.data.nodes
             if body is not None and body.data is not None
             else None
+        )
+        logger.debug(
+            '阿里云检索返回 | nodes={} 条',
+            len(nodes or []),
         )
         return [self._to_hit(node) for node in nodes or []]
 

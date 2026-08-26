@@ -5,6 +5,9 @@
 可折叠切片列表.
 """
 
+import time
+
+from loguru import logger
 from nicegui import background_tasks
 from nicegui import ui
 
@@ -205,9 +208,19 @@ class SearchPanel:
         """
         if self._log_panel is not None:
             self._log_panel.start_capture()
+        start_time = time.perf_counter()
+        logger.info(
+            '知识检索开始 | platform={} | limit={} | query_len={}',
+            platform, limit, len(query),
+        )
         try:
             backend = create_query_backend(platform, self._store)
             hits = await backend.search(query, limit)
+            elapsed = time.perf_counter() - start_time
+            logger.info(
+                '知识检索完成 | platform={} | 命中 {} 条 | 耗时 {:.1f}s',
+                platform, len(hits), elapsed,
+            )
             # 代次校验: 期间切换平台或重新发起检索,
             # 旧代次结果不再渲染进当前结果区
             if run_id != self._run_id:
@@ -219,6 +232,10 @@ class SearchPanel:
                 type='positive',
             )
         except Exception as exc:
+            logger.exception(
+                '知识检索失败 | platform={} | {}',
+                platform, exc,
+            )
             safe_notify(
                 self._container,
                 f'检索失败: {error_summary(exc)}',

@@ -6,6 +6,8 @@
 
 from typing import cast
 
+from loguru import logger
+
 from ipo_know.clients.aliyun_knowledge.client import AliyunKnowledgeClient
 from ipo_know.clients.viking_knowledge import VikingKnowledgeClient
 from ipo_know.config.config import AliyunKnowledgeSettings
@@ -42,6 +44,7 @@ def create_query_backend(
     Raises:
         ValueError: 平台标识不受支持时抛出.
     """
+    logger.debug('构造查询后端 | platform={}', platform)
     if platform == 'volc':
         client_kwargs = store.get_volc_client_kwargs()
         client = VikingKnowledgeClient(**client_kwargs)  # type: ignore[arg-type]

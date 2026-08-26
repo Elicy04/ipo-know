@@ -11,12 +11,14 @@ async 接口, 内部通过 asyncio.to_thread 将同步 SDK 调用投递到线程
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 
+import requests as _requests
 from loguru import logger
 from vikingdb import IAM
 from vikingdb import APIKey
@@ -42,7 +44,12 @@ from vikingdb.knowledge import ServiceChatResponse
 from vikingdb.knowledge import UpdatePointRequest
 from vikingdb.knowledge.models.base import CommonResponse
 from vikingdb.knowledge.models.point import PointAddResponse
+from volcengine.auth.SignerV4 import SignerV4
+from volcengine.base.Request import Request
+from volcengine.Credentials import Credentials
 
+from ipo_know.clients.monitor_dto import BalanceInfo
+from ipo_know.clients.monitor_dto import BillDetailItem
 from ipo_know.config.config import VikingKnowledgeSettings
 from ipo_know.config.config import settings
 
@@ -285,6 +292,305 @@ class VikingKnowledgeClient:
                 '至少需要配置其中一项'
             )
         await self.list_docs(ListDocsRequest(offset=0, limit=1))
+
+    # ==================================================
+    # 监控 / 余额 / 账单
+    # ==================================================
+    def _request_billing(
+        self,
+        action: str,
+        params: dict[str, object] | None = None,
+        *,
+        method: str = 'GET',
+    ) -> dict:
+        """发送火山引擎 billing 开放平台签名请求.
+
+        使用 volcengine V4 签名 (service=billing),
+        目标 Host 为 open.volcengineapi.com.
+        GET 请求参数放 query; POST 请求参数放 JSON body.
+
+        Args:
+            action: API Action 名称.
+            params: 业务参数.
+            method: HTTP 方法, 默认 GET.
+
+        Returns:
+            响应中的 Result 字典.
+
+        Raises:
+            RuntimeError: HTTP 状态码非 200 或响应中
+                包含错误信息.
+        """
+        credentials = Credentials(
+            self._config.ak,
+            self._config.sk,
+            'billing',
+            self._config.region,
+        )
+        req = Request()
+        req.set_schema(self._config.scheme)
+        req.set_method(method)
+        req.set_host('open.volcengineapi.com')
+        req.set_path('/')
+        # Action/Version 始终放 query
+        query = {
+            'Action': action,
+            'Version': '2022-01-01',
+        }
+        req.set_query(query)
+        body_bytes = b''
+        if method == 'POST' and params:
+            # POST: 业务参数放 JSON body, 保持原始类型
+            body_str = json.dumps(params)
+            body_bytes = body_str.encode('utf-8')
+            req.headers['Content-Type'] = 'application/json'
+            req.set_body(body_str)
+        elif params:
+            # GET: 业务参数放 query
+            req.set_query({
+                **query,
+                **{
+                    k: str(v) for k, v in params.items()
+                },
+            })
+        SignerV4.sign(req, credentials)
+        url = req.build()
+        if method == 'POST':
+            resp = _requests.post(
+                url,
+                headers=req.headers,
+                data=body_bytes,
+                timeout=self._config.timeout,
+            )
+        else:
+            resp = _requests.get(
+                url,
+                headers=req.headers,
+                timeout=self._config.timeout,
+            )
+        if resp.status_code != 200:
+            logger.error(
+                '火山 billing 请求失败'
+                ' | action={} | status={} | body={}',
+                action,
+                resp.status_code,
+                resp.text,
+            )
+            raise RuntimeError(
+                f'火山 billing 请求失败'
+                f' | status={resp.status_code}'
+            )
+        data = resp.json()
+        meta = data.get('ResponseMetadata', {})
+        if meta.get('Error'):
+            err = meta['Error']
+            logger.error(
+                '火山 billing 响应错误'
+                ' | action={} | code={} | msg={} | body={}',
+                action,
+                err.get('Code', ''),
+                err.get('Message', ''),
+                resp.text,
+            )
+            raise RuntimeError(
+                f'火山 billing 响应错误 | '
+                f"code={err.get('Code', '')} | "
+                f"message={err.get('Message', '')}"
+            )
+        return data.get('Result', {})
+
+    async def get_collection_info(self) -> dict:
+        """获取知识库详情信息.
+
+        通过 POST /api/knowledge/collection/info 接口
+        获取知识库描述、版本、文档数等详细信息.
+        复用现有 IAM 鉴权签名机制.
+
+        Returns:
+            知识库信息字典, 包含 collection_name,
+            doc_num, create_time 等字段.
+        """
+        logger.debug(
+            '火山 get_collection_info 调用 | '
+            'resource_id={}',
+            self._config.resource_id,
+        )
+
+        def _call() -> dict:
+            client = self._get_client()
+            api_info = client.api_info['SearchCollection']
+            from volcengine.ApiInfo import ApiInfo
+            info_api = ApiInfo(
+                'POST',
+                '/api/knowledge/collection/info',
+                {}, {}, api_info.header,
+            )
+            req = client.prepare_request(info_api, {})
+            payload = {}
+            if self._config.resource_id:
+                payload['resource_id'] = (
+                    self._config.resource_id
+                )
+            if self._config.project_name:
+                payload['project'] = (
+                    self._config.project_name
+                )
+            req.body = json.dumps(payload)
+            client.auth_provider.sign_request(req)
+            url = req.build()
+            resp = _requests.post(
+                url,
+                headers=req.headers,
+                data=req.body.encode('utf-8'),
+                timeout=(
+                    client.service_info.connection_timeout,
+                    client.service_info.socket_timeout,
+                ),
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f'火山 collection_info 请求失败'
+                    f' | status={resp.status_code}'
+                )
+            result = resp.json()
+            if result.get('code', 0) != 0:
+                raise RuntimeError(
+                    f'火山 collection_info 响应错误'
+                    f" | code={result.get('code')}"
+                    f" | message={result.get('message', '')}"
+                )
+            return result.get('data', {})
+
+        data = await self._run_in_thread(_call)
+        logger.debug(
+            '火山 get_collection_info 响应 | '
+            'collection_name={} | doc_num={}',
+            data.get('collection_name', ''),
+            data.get('doc_num', 0),
+        )
+        return data
+
+    async def query_account_balance(self) -> BalanceInfo:
+        """查询火山引擎账户余额.
+
+        通过 GET open.volcengineapi.com
+        ?Action=QueryBalanceAcct&Version=2022-01-01
+        查询账户可用余额、现金余额、信控额度等信息.
+
+        Returns:
+            BalanceInfo DTO, platform='volc'.
+        """
+        logger.debug('火山 query_account_balance 调用')
+
+        def _call() -> BalanceInfo:
+            result = self._request_billing(
+                'QueryBalanceAcct',
+            )
+            return BalanceInfo(
+                platform='volc',
+                available_amount=str(
+                    result.get(
+                        'AvailableBalance', '0',
+                    )
+                ),
+                cash_amount=str(
+                    result.get('CashBalance', '0')
+                ),
+                credit_amount=str(
+                    result.get('CreditLimit', '0')
+                ),
+                currency='CNY',
+            )
+
+        info = await self._run_in_thread(_call)
+        logger.debug(
+            '火山 query_account_balance 响应 | '
+            'available={}',
+            info.available_amount,
+        )
+        return info
+
+    async def query_bill_details(
+        self,
+        bill_period: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[BillDetailItem]:
+        """查询火山引擎账单明细.
+
+        通过 GET open.volcengineapi.com
+        ?Action=ListBillDetail&Version=2022-01-01
+        获取指定账期的消费明细列表.
+
+        Args:
+            bill_period: 账期, YYYY-MM 格式.
+            limit: 每页记录数, 上限 300.
+            offset: 分页偏移量.
+
+        Returns:
+            BillDetailItem DTO 列表.
+        """
+        logger.debug(
+            '火山 query_bill_details 调用 | '
+            'bill_period={} | limit={} | offset={}',
+            bill_period, limit, offset,
+        )
+
+        def _call() -> list[BillDetailItem]:
+            result = self._request_billing(
+                'ListBillDetail',
+                {
+                    'BillPeriod': bill_period,
+                    'Limit': limit,
+                    'Offset': offset,
+                },
+                method='POST',
+            )
+            items: list[BillDetailItem] = []
+            for item in result.get('List', []):
+                items.append(
+                    BillDetailItem(
+                        record_id=str(
+                            item.get(
+                                'BillDetailId', '',
+                            )
+                        ),
+                        date=str(
+                            item.get(
+                                'ExpenseDate', '',
+                            )
+                        ),
+                        product=str(
+                            item.get(
+                                'ProductZh', '',
+                            )
+                        ),
+                        amount=str(
+                            item.get(
+                                'PayableAmount', '0',
+                            )
+                        ),
+                        payment_method=str(
+                            item.get(
+                                'BillingMode', '',
+                            )
+                        ),
+                        remark=str(
+                            item.get(
+                                'BillCategory', '',
+                            )
+                        ),
+                    )
+                )
+            return items
+
+        details = await self._run_in_thread(_call)
+        logger.debug(
+            '火山 query_bill_details 响应 | '
+            'count={}',
+            len(details),
+        )
+        return details
 
     # ==================================================
     # 文档管理
@@ -591,12 +897,27 @@ class VikingKnowledgeClient:
         Returns:
             知识库检索响应.
         """
-        return await self._run_in_thread(
+        resource_id = (
+            request.get('service_resource_id', '')
+            if isinstance(request, Mapping)
+            else getattr(request, 'service_resource_id', '')
+        )
+        logger.debug(
+            '火山 search_knowledge 调用 | service_resource_id={}',
+            resource_id,
+        )
+        response = await self._run_in_thread(
             self._get_collection().search_knowledge,
             request,
             headers=headers,
             timeout=timeout,
         )
+        _result = response.result
+        logger.debug(
+            '火山 search_knowledge 响应 | results={}',
+            len(_result.result_list if _result else []),
+        )
+        return response
 
     async def chat_completion(
         self,
