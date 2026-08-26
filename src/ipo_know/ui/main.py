@@ -3,11 +3,13 @@
 启动 NiceGUI native 窗口, 组装配置面板、操作面板与日志面板.
 """
 
+import atexit
 import ctypes
 import logging
 import sys
 from pathlib import Path
 
+from nicegui import app
 from nicegui import ui
 from nicegui.events import ValueChangeEventArguments
 
@@ -16,6 +18,7 @@ from ipo_know.ui.chat_panel import ChatPanel
 from ipo_know.ui.config_panel import ConfigPanel
 from ipo_know.ui.config_store import GUIConfigStore
 from ipo_know.ui.log_panel import LogPanel
+from ipo_know.ui.monitor_panel import MonitorPanel
 from ipo_know.ui.operation_panel import OperationPanel
 from ipo_know.ui.platform import PLATFORM_OPTIONS
 from ipo_know.ui.search_panel import SearchPanel
@@ -194,6 +197,30 @@ def precheck_runtime_environment() -> None:
         )
 
 
+def _cleanup(
+    operation_panel: OperationPanel,
+    search_panel: SearchPanel,
+    chat_panel: ChatPanel,
+    monitor_panel: MonitorPanel,
+) -> None:
+    """应用退出时清理所有后台任务."""
+    logger.info('应用退出, 开始清理后台任务...')
+
+    for panel_name, panel in [
+        ('OperationPanel', operation_panel),
+        ('SearchPanel', search_panel),
+        ('ChatPanel', chat_panel),
+        ('MonitorPanel', monitor_panel),
+    ]:
+        if hasattr(panel, '_running'):
+            panel._running = False
+            logger.debug(
+                '%s 后台任务已标记为停止', panel_name,
+            )
+
+    logger.info('后台任务清理完成')
+
+
 def main() -> None:
     """启动 IPO Know GUI 桌面端."""
     setup_logging()
@@ -210,7 +237,7 @@ def main() -> None:
 
     @ui.page('/')
     def index() -> None:
-        """主页面布局: 页签栏与全局平台选择同行 + 五页签."""
+        """主页面布局: 页签栏与全局平台选择同行 + 六页签."""
         # 全局深色模式, 须在任何 UI 元素创建之前启用
         ui.dark_mode(True)
 
@@ -226,7 +253,7 @@ def main() -> None:
             )
 
         # 填充页签区: 平台配置 / 数据同步 / 知识检索 /
-        # 知识问答 / 运行日志
+        # 知识问答 / 监控 / 运行日志
         with tabs_col:
             # 页签栏与全局平台选择同行呈现: 页签 flex-1
             # 占主宽度居左 (min-w-0 允许收缩, 防溢出),
@@ -236,6 +263,9 @@ def main() -> None:
                 'w-full items-center gap-2 flex-wrap'
             ):
                 with ui.tabs().classes('flex-1 min-w-0') as tabs:
+                    tab_log = ui.tab(
+                        'log', label='运行日志', icon='terminal'
+                    )
                     tab_config = ui.tab(
                         'config', label='平台配置', icon='settings'
                     )
@@ -248,8 +278,9 @@ def main() -> None:
                     tab_chat = ui.tab(
                         'chat', label='知识问答', icon='chat'
                     )
-                    tab_log = ui.tab(
-                        'log', label='运行日志', icon='terminal'
+                    tab_monitor = ui.tab(
+                        'monitor', label='监控',
+                        icon='analytics',
                     )
                 # 全局目标平台选择 (单点驱动各面板),
                 # 与页签栏同行靠右
@@ -269,7 +300,7 @@ def main() -> None:
                 # 日志面板须先于操作/检索/问答面板创建
                 # (供其构造引用), 故在页签容器内最先实例化;
                 # 页签显示按 value 切换 (v-show), 与面板
-                # DOM 顺序无关, 仍置于最后一个页签.
+                # DOM 顺序无关, 仍置于第一个 tab_panel.
                 # 构造时即注册 sink 与刷新定时器,
                 # 不依赖页签可见性; 启动时立即开始捕获;
                 # h-full 使日志面板填满页签内容区
@@ -307,7 +338,33 @@ def main() -> None:
                         config_store=config_store,
                         log_panel=log_panel,
                     )
+                with ui.tab_panel(tab_monitor):
+                    monitor_panel = MonitorPanel(
+                        config_store=config_store,
+                    )
         operation_panel_ref.append(operation_panel)
+
+        # 注册应用退出时的清理回调
+        atexit.register(
+            _cleanup,
+            operation_panel,
+            search_panel,
+            chat_panel,
+            monitor_panel,
+        )
+        logger.info('已注册应用退出清理回调')
+
+        # NiceGUI 应用级关闭回调, 在事件循环停止前执行,
+        # 确保 asyncio 后台任务能被及时取消
+        app.on_shutdown(
+            lambda: _cleanup(
+                operation_panel,
+                search_panel,
+                chat_panel,
+                monitor_panel,
+            )
+        )
+        logger.info('已注册 NiceGUI app.on_shutdown 回调')
 
         # 全局平台切换单点驱动四个面板
         def _on_platform_change(
@@ -323,6 +380,7 @@ def main() -> None:
             operation_panel.set_platform(value)
             search_panel.set_platform(value)
             chat_panel.set_platform(value)
+            monitor_panel.set_platform(value)
 
         platform_select.on_value_change(_on_platform_change)
         # on_value_change 不对 select 初始值触发, 须显式做一次
@@ -332,6 +390,7 @@ def main() -> None:
         operation_panel.set_platform(initial_platform)
         search_panel.set_platform(initial_platform)
         chat_panel.set_platform(initial_platform)
+        monitor_panel.set_platform(initial_platform)
 
     # favicon 传本地 Path: NiceGUI 会以 FileResponse 挂载到
     # /favicon.ico; 传字符串路径会落入 data-URL 分支而失效

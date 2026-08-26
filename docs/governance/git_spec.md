@@ -19,9 +19,7 @@ date created: July 28th 2026, 12:59 pm
 本项目采用<span style="color:#000; background:#fff59d; font-weight:bold;">Conventional Commits</span>
 >Conventional Commits（约定式提交）是一套轻量级的 Git 提交信息规范，它为提交消息定义了统一的结构化格式，让提交历史具备**可读性、可追溯性、可自动化处理**的特性。该规范脱胎于 Angular 团队的提交准则，现已成为业界广泛采用的通用标准，官方定义站点为 [conventionalcommits.org](https://www.conventionalcommits.org)
 本地提交严格遵循Conventional Commits规范。
-~~如果在**uv环境终端执行**，提交时会自动检查commit message格式是否符合规范~~。
-P.S.这里是因为配置了 `git/hooks/commit-msg` 钩子。
-P.S1.发现.git/hooks 无法被上传到云端仓库。所以这里需要额外注意规范检查。
+P.S.发现.git/hooks 无法被上传到云端仓库。所以这里需要额外注意规范检查。
 长远来说，后续可以考虑在云端仓库网站利用workflow来检查commit message是否符合规范。
 
 
@@ -52,7 +50,7 @@ P.S.合并信息主流网站可以**自动生成**，无需手动编写。
 
 2. 开发完成后，对分支的所有提交进行uv环境lock文件重新生成和格式化检查，两者有需要各自作为一个提交。具体方法参照 `## commit 前格式化检查办法` 。
 
-2. 开发+格式化检查修复提交完成后，将分支推送到云端仓库。发起Pull Request(PR)。
+2. 开发+格式化检查修复提交完成后，先拉取最新云端main分支进行git rebase并解决冲突，然后再将分支推送到云端仓库，发起Pull Request(PR)。
 合并时使用压缩合并的方式，合并的信息采取上面 `## Squash Merge规范` 。
 P.S.如果多人合作开发，可以早些推送到云端仓库，但单个分支开发最后完成前必须对代码进行格式化检查和修复。
 
@@ -84,12 +82,13 @@ P.S. git branch -D <分支名> 会强制删除分支，不提示确认。
 - 对分支的所有提交进行格式化检查，有格式问题作为一个提交进行修复。具体方法参照 `## commit 前格式化检查办法` 。
 `uv run ruff check .`
 `...相关提交命令`
-4. 云端推送：开发+格式化检查修复提交完成后，将分支推送到云端仓库。发起Pull Request(PR)。
+4. 解决冲突：使用git rebase命令，拉取最新远程main分支，并解决冲突部分。
+5. 云端推送：开发+格式化检查修复提交完成且解决和最新main分支冲突后，将分支推送到云端仓库。发起Pull Request(PR)。
 `git push -u origin feat/<new-feature-name>`
 P.S.这里名字和分支名最好一致，方便后续操作。
-5. 云端合并：管理员在云端仓库网站(如 GitHub、GitLab 等)上发起合并分支的Pull Request(PR)。
+6. 云端合并：管理员在云端仓库网站(如 GitHub、GitLab 等)上发起合并分支的Pull Request(PR)。
 管理员审核通过后，压缩合并(Squash Merge)分支到主干。PR关闭,并删除云端已合并的分支。
-6. 本地清理：切换到主干分支，拉取最新代码。删除已经合并完成的本地临时分支。
+7. 本地清理：切换到主干分支，拉取最新代码。删除已经合并完成的本地临时分支。
 `git switch main`
 `git pull origin main`
 `git branch -d feat/<new-feature-name>`。

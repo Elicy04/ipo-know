@@ -75,9 +75,13 @@ class VolcQueryBackend:
         request = SearchKnowledgeRequest(
             query=query, limit=max(1, limit)
         )
+        logger.debug('火山检索发起 | limit={}', max(1, limit))
         response = await self._client.search_knowledge(request)
         result = response.result
         items = result.result_list if result else []
+        logger.debug(
+            '火山检索返回 | items={} 条', len(items),
+        )
         return [self._to_hit(item) for item in items]
 
     @staticmethod

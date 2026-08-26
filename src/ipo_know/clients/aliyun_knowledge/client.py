@@ -18,9 +18,13 @@ from collections.abc import Callable
 import requests
 from alibabacloud_bailian20231229 import models as bailian_models
 from alibabacloud_bailian20231229.client import Client as BailianClient
+from alibabacloud_bssopenapi20171214 import models as bss_models
+from alibabacloud_bssopenapi20171214.client import Client as BssClient
 from alibabacloud_tea_openapi import models as open_api_models
 from loguru import logger
 
+from ipo_know.clients.monitor_dto import BalanceInfo
+from ipo_know.clients.monitor_dto import BillDetailItem
 from ipo_know.config.config import AliyunKnowledgeSettings
 from ipo_know.config.config import settings
 
@@ -93,6 +97,7 @@ class AliyunKnowledgeClient:
         """
         self._config = config or settings.aliyun_knowledge
         self._client: BailianClient | None = None
+        self._bss_client: BssClient | None = None
         self._rate_limiter = _ApiRateLimiter(API_RATE_LIMIT_PER_SECOND)
         logger.info(
             '百炼知识库客户端初始化 | endpoint={} | workspace={}',
@@ -118,6 +123,22 @@ class AliyunKnowledgeClient:
             )
             self._client = BailianClient(open_api_config)
         return self._client
+
+    @property
+    def _get_bss_client(self) -> BssClient:
+        """懒加载 BSS 费用中心客户端."""
+        if self._bss_client is None:
+            if not self._config.ak or not self._config.sk:
+                raise ValueError(
+                    '百炼知识库 AK/SK 未配置，请通过 GUI 配置填写'
+                )
+            bss_config = open_api_models.Config(
+                access_key_id=self._config.ak,
+                access_key_secret=self._config.sk,
+                endpoint='business.aliyuncs.com',
+            )
+            self._bss_client = BssClient(bss_config)
+        return self._bss_client
 
     @property
     def workspace_id(self) -> str:
@@ -367,11 +388,24 @@ class AliyunKnowledgeClient:
         Returns:
             检索响应, body.data.nodes 为命中的文本切片列表.
         """
-        return await self._api_call(
+        logger.debug(
+            '百炼 Retrieve 调用 | workspace_id={} | index_id={}',
+            self.workspace_id, request.index_id,
+        )
+        response = await self._api_call(
             self._get_client().retrieve,
             self.workspace_id,
             request,
         )
+        logger.debug(
+            '百炼 Retrieve 响应 | nodes={}',
+            len(
+                (response.body.data.nodes or [])
+                if response.body and response.body.data
+                else []
+            ),
+        )
+        return response
 
     # ==================================================
     # 组合能力: 上传 → 解析 → 入索引
@@ -532,6 +566,209 @@ class AliyunKnowledgeClient:
             f'等待入索引任务超时 ({JOB_POLL_TIMEOUT_SECONDS}s) | '
             f'JobId={job_id}'
         )
+
+    # ==================================================
+    # 薄封装: 监控与账户
+    # ==================================================
+    async def get_index_doc_count(self) -> int:
+        """获取知识库内文档总数.
+
+        通过 list_index_documents 接口取第 1 页
+        仅 1 条记录, 利用响应中的 total_count 字段
+        获得文档总数, 避免拉取全量文档列表.
+
+        Returns:
+            知识库内文档总数.
+        """
+        logger.debug(
+            '百炼 get_index_doc_count 调用 '
+            '| index_id={}',
+            self.index_id,
+        )
+        request = bailian_models.ListIndexDocumentsRequest(
+            index_id=self.index_id,
+            page_number=1,
+            page_size=1,
+        )
+        response = await self.list_index_documents(request)
+        data = (
+            response.body.data
+            if response.body else None
+        )
+        count = (
+            data.total_count if data else 0
+        ) or 0
+        logger.debug(
+            '百炼 get_index_doc_count 响应 '
+            '| total_count={}',
+            count,
+        )
+        return count
+
+    async def get_index_monitor(
+        self,
+        start_timestamp: int,
+        end_timestamp: int,
+    ) -> dict:
+        """获取知识库监控数据 (存储 + QPS).
+
+        Args:
+            start_timestamp: 查询起始时间 (秒级 Unix 时间戳).
+            end_timestamp: 查询结束时间 (秒级 Unix 时间戳).
+
+        Returns:
+            解析后的监控数据 dict, 含存储与 QPS 监控信息.
+        """
+        logger.debug(
+            '百炼 IndexMonitor 调用 | index_id={} | '
+            'start={} | end={}',
+            self.index_id, start_timestamp, end_timestamp,
+        )
+        request = bailian_models.GetIndexMonitorRequest(
+            index_id=self.index_id,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+        response = await self._api_call(
+            self._get_client().get_index_monitor,
+            self.workspace_id,
+            request,
+        )
+        data = response.body.data
+        if isinstance(data, str):
+            data = json.loads(data)
+        # 剥离外层信封，提取实际监控数据
+        if isinstance(data, dict) and 'data' in data:
+            data = data['data']
+        logger.debug(
+            '百炼 IndexMonitor 响应 | type={}',
+            type(data).__name__,
+        )
+        return data
+
+    async def query_account_balance(self) -> BalanceInfo:
+        """查询阿里云账户余额.
+
+        Returns:
+            BalanceInfo DTO, platform='aliyun'.
+        """
+        logger.debug('百炼 账户余额 调用')
+        response = await self._api_call(
+            self._get_bss_client.query_account_balance,
+        )
+        d = response.body.data
+        info = BalanceInfo(
+            platform='aliyun',
+            available_amount=d.available_amount or '',
+            cash_amount=d.available_cash_amount or '',
+            credit_amount=d.credit_amount or '',
+            currency=d.currency or 'CNY',
+        )
+        logger.debug(
+            '百炼 账户余额 响应 | available={} | currency={}',
+            info.available_amount, info.currency,
+        )
+        return info
+
+    async def query_account_transaction_details(
+        self,
+        create_time_start: str,
+        create_time_end: str,
+    ) -> list[BillDetailItem]:
+        """查询阿里云收支明细 (自动翻页).
+
+        循环调用直至 next_token 为空, 聚合全部
+        BillDetailItem 后返回.
+
+        Args:
+            create_time_start: 创建时间起始 (如 '2026-01-01').
+            create_time_end: 创建时间终止 (如 '2026-01-31').
+
+        Returns:
+            全部翻页的 BillDetailItem 列表.
+        """
+        all_items: list[BillDetailItem] = []
+        next_token: str | None = None
+        while True:
+            logger.debug(
+                '百炼 收支明细 调用 | start={} |'
+                ' end={} | token={}',
+                create_time_start,
+                create_time_end,
+                next_token,
+            )
+            request = (
+                bss_models
+                .QueryAccountTransactionDetailsRequest(
+                    create_time_start=create_time_start,
+                    create_time_end=create_time_end,
+                    next_token=next_token,
+                )
+            )
+            response = await self._api_call(
+                self._get_bss_client
+                .query_account_transaction_details,
+                request,
+            )
+            data = response.body.data
+            tx_list = (
+                data.account_transactions_list
+                .account_transactions_list
+                if data and data.account_transactions_list
+                else []
+            )
+            items = [
+                BillDetailItem(
+                    record_id=(
+                        getattr(tx, 'record_id', '') or ''
+                    ),
+                    date=(
+                        getattr(
+                            tx, 'transaction_time', '',
+                        ) or ''
+                    ),
+                    product=(
+                        getattr(
+                            tx,
+                            'transaction_type',
+                            '',
+                        ) or ''
+                    ),
+                    amount=(
+                        getattr(tx, 'amount', '') or ''
+                    ),
+                    payment_method=(
+                        getattr(
+                            tx,
+                            'transaction_channel',
+                            '',
+                        ) or ''
+                    ),
+                    remark=(
+                        getattr(tx, 'remarks', '') or ''
+                    ),
+                )
+                for tx in (tx_list or [])
+            ]
+            all_items.extend(items)
+            next_token = (
+                getattr(data, 'next_token', None)
+                if data else None
+            )
+            logger.debug(
+                '百炼 收支明细 翻页 | count={} |'
+                ' total={} | next_token={}',
+                len(items),
+                getattr(data, 'total_count', 0),
+                next_token,
+            )
+            if not next_token:
+                break
+        logger.debug(
+            '百炼 收支明细 完成 | total_items={}',
+            len(all_items),
+        )
+        return all_items
 
     @staticmethod
     def _collect_failed_documents(
