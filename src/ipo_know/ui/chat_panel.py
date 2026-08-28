@@ -29,11 +29,11 @@ from nicegui.events import GenericEventArguments
 from nicegui.events import ScrollEventArguments
 from nicegui.events import UploadEventArguments
 
+from ipo_know.clients.aliyun_knowledge.client import AliyunKnowledgeClient
 from ipo_know.export.assembler import assemble_export_document
 from ipo_know.export.assembler import sanitize_filename
 from ipo_know.export.llm_summary import summarize_and_name
 from ipo_know.export.md_to_pdf import convert_markdown_to_pdf
-from ipo_know.clients.aliyun_knowledge.client import AliyunKnowledgeClient
 from ipo_know.kb_query import SearchHit
 from ipo_know.kb_query import create_query_backend
 from ipo_know.ui.chat_attachments import ChatAttachments
