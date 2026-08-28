@@ -1,8 +1,9 @@
-"""监控面板: 账户余额 + 知识库监控 + 本月交易明细.
+"""监控面板: 账户余额 + 知识库监控 + 账单与流水.
 
 提供阿里云百炼与火山引擎两个平台的账户余额查询、
-知识库存储监控与本月账单明细展示. 后台并行拉取三类
-数据, 各自独立渲染到对应卡片区域.
+知识库存储监控与账单展示. 后台并行拉取各类数据,
+各自独立渲染到对应卡片区域. 账单卡片含「消费明细」
+(阿里云实例账单, 独立降级) 与「资金流水」双子页签.
 """
 
 import asyncio
@@ -17,6 +18,7 @@ from nicegui import ui
 from ipo_know.clients.aliyun_knowledge.client import AliyunKnowledgeClient
 from ipo_know.clients.monitor_dto import BalanceInfo
 from ipo_know.clients.monitor_dto import BillDetailItem
+from ipo_know.clients.monitor_dto import InstanceBillItem
 from ipo_know.clients.monitor_dto import KbMonitorSummary
 from ipo_know.clients.viking_knowledge import VikingKnowledgeClient
 from ipo_know.ui.config_store import GUIConfigStore
@@ -46,7 +48,7 @@ def _format_ts(ts: object) -> str | None:
         return None
 
 
-# 账单表格列定义.
+# 资金流水表格列定义.
 _BILL_COLUMNS = [
     {'name': 'date', 'label': '日期',
      'field': 'date', 'align': 'left'},
@@ -60,9 +62,41 @@ _BILL_COLUMNS = [
      'field': 'remark', 'align': 'left'},
 ]
 
+# 消费明细表格列定义 (实例级账单).
+_INSTANCE_BILL_COLUMNS = [
+    {'name': 'date', 'label': '日期',
+     'field': 'date', 'align': 'left'},
+    {'name': 'product', 'label': '产品',
+     'field': 'product', 'align': 'left'},
+    {'name': 'instance', 'label': '实例/计费项',
+     'field': 'instance', 'align': 'left'},
+    {'name': 'bill_type', 'label': '账单类型',
+     'field': 'bill_type', 'align': 'left'},
+    {'name': 'pretax', 'label': '应付金额',
+     'field': 'pretax', 'align': 'right'},
+    {'name': 'discount', 'label': '优惠',
+     'field': 'discount', 'align': 'right'},
+    {'name': 'payment', 'label': '现金支付',
+     'field': 'payment', 'align': 'right'},
+]
+
+# 账单类型原始枚举 → 中文展示名.
+_ITEM_TYPE_LABELS = {
+    'SubscriptionOrder': '预付订单',
+    'PayAsYouGoBill': '后付账单',
+    'Refund': '退款',
+    'Adjustment': '调账',
+}
+
+# 账期可选月数 (API 仅支持近 18 个月).
+_BILL_CYCLE_MONTHS = 18
+
+# 粒度切换选项: 接口枚举 → 展示文案 (NiceGUI dict 选项语义为 {值: 标签}).
+_GRANULARITY_OPTIONS = {'MONTHLY': '按月', 'DAILY': '按日'}
+
 
 class MonitorPanel:
-    """监控面板: 账户余额 + 知识库监控 + 本月交易明细.
+    """监控面板: 账户余额 + 知识库监控 + 账单与流水.
 
     Attributes:
         _config_store: GUI 配置持久化存储实例.
@@ -73,7 +107,12 @@ class MonitorPanel:
         _btn_refresh: 刷新按钮.
         _balance_col: 余额卡片内容容器.
         _monitor_col: 监控卡片内容容器.
-        _bill_table: 账单表格组件.
+        _bill_cycle_select: 消费明细账期下拉.
+        _bill_granularity: 消费明细粒度切换.
+        _bill_summary_row: 消费明细汇总条容器.
+        _bill_status_label: 消费明细状态文案行.
+        _instance_table: 消费明细表格组件.
+        _tx_table: 资金流水表格组件.
     """
 
     def __init__(
@@ -92,7 +131,12 @@ class MonitorPanel:
         self._btn_refresh: ui.button | None = None
         self._balance_col: ui.column | None = None
         self._monitor_col: ui.column | None = None
-        self._bill_table: ui.table | None = None
+        self._bill_cycle_select: ui.select | None = None
+        self._bill_granularity: ui.toggle | None = None
+        self._bill_summary_row: ui.row | None = None
+        self._bill_status_label: ui.label | None = None
+        self._instance_table: ui.table | None = None
+        self._tx_table: ui.table | None = None
         self._build_ui()
 
     # --------------------------------------------------
@@ -107,6 +151,12 @@ class MonitorPanel:
         self._platform = platform
         self._run_id += 1
         self._clear_all_cards()
+        # 消费明细控件仅阿里云语义下生效, 火山平台隐藏.
+        aliyun_only = platform == 'aliyun'
+        if self._bill_cycle_select is not None:
+            self._bill_cycle_select.set_visibility(aliyun_only)
+        if self._bill_granularity is not None:
+            self._bill_granularity.set_visibility(aliyun_only)
         platform_name = PLATFORM_OPTIONS.get(
             platform, platform,
         )
@@ -158,19 +208,87 @@ class MonitorPanel:
                         ui.column().classes('w-full gap-1')
                     )
 
-            # 全宽账单表格卡片
+            # 全宽账单卡片: 消费明细 + 资金流水双子页签.
             with ui.card().classes('w-full p-4 gap-2'):
-                ui.label('本月交易明细').classes(
+                ui.label('账单与流水').classes(
                     'text-base font-bold',
                 )
-                self._bill_table = ui.table(
-                    columns=_BILL_COLUMNS,
-                    rows=[],
-                    row_key='record_id',
-                ).classes('w-full')
+                with ui.tabs().classes('w-full') as bill_tabs:
+                    tab_consumption = ui.tab('消费明细')
+                    tab_flow = ui.tab('资金流水')
+                with ui.tab_panels(bill_tabs).classes('w-full'):
+                    with ui.tab_panel(tab_consumption):
+                        self._build_consumption_tab()
+                    with ui.tab_panel(tab_flow):
+                        self._tx_table = ui.table(
+                            columns=_BILL_COLUMNS,
+                            rows=[],
+                            row_key='record_id',
+                        ).classes('w-full')
 
         # 定时刷新按钮灰化状态
         ui.timer(0.5, self._refresh_btn_state)
+
+    def _build_consumption_tab(self) -> None:
+        """构建消费明细页签: 控件行 + 汇总条 + 表格."""
+        cycles = self._bill_cycle_options()
+        with ui.row().classes('items-end gap-3'):
+            # 默认账期取本月 (列表首项); 当月含未出账盲区,
+            # 由下方延迟提示小字说明.
+            self._bill_cycle_select = ui.select(
+                options=cycles,
+                value=cycles[0],
+                label='账期月份',
+            ).classes('w-32')
+            self._bill_granularity = ui.toggle(
+                options=_GRANULARITY_OPTIONS,
+                value='MONTHLY',
+            )
+        self._bill_summary_row = ui.row().classes(
+            'w-full gap-4 text-sm',
+        )
+        self._bill_status_label = ui.label().classes(
+            'text-xs text-negative',
+        )
+        self._instance_table = ui.table(
+            columns=_INSTANCE_BILL_COLUMNS,
+            rows=[],
+            row_key='key',
+        ).classes('w-full')
+        # 退款/调账行金额列标色区分.
+        self._instance_table.add_slot(
+            'body-cell-bill_type',
+            r'''
+            <q-td :props="props">
+                <div :class="['退款', '调账']
+                    .includes(props.value)
+                    ? 'text-green-600 font-medium' : ''">
+                    {{ props.value }}
+                </div>
+            </q-td>
+            ''',
+        )
+        ui.label(
+            '账单数据延迟约 24 小时，当月数据仅供参考',
+        ).classes('text-xs text-gray-400')
+
+    @staticmethod
+    def _bill_cycle_options() -> list[str]:
+        """生成近 18 个可选账期月份列表 (按月降序).
+
+        Returns:
+            'YYYY-MM' 格式账期列表, 首项为当月.
+        """
+        now = datetime.now()
+        options: list[str] = []
+        for offset in range(_BILL_CYCLE_MONTHS):
+            year = now.year
+            month = now.month - offset
+            while month <= 0:
+                month += 12
+                year -= 1
+            options.append(f'{year:04d}-{month:02d}')
+        return options
 
     # --------------------------------------------------
     # 刷新回调 (后台任务五段式)
@@ -201,47 +319,88 @@ class MonitorPanel:
                 type='warning',
             )
             return
-        # 段四: 启动后台任务
+        # 段四: 快照消费明细查询参数 (账期/粒度)
+        cycle, granularity = self._snapshot_bill_state()
+        # 段五: 启动后台任务
         self._running = True
         self._run_id += 1
         run_id = self._run_id
-        # 段五: 后台协程
+        # 段六: 后台协程
         background_tasks.create(
-            self._run_refresh(platform, run_id),
+            self._run_refresh(
+                platform, run_id, cycle, granularity,
+            ),
             name='monitor refresh',
+        )
+
+    def _snapshot_bill_state(self) -> tuple[str, str]:
+        """快照当前消费明细查询参数.
+
+        Returns:
+            (账期 'YYYY-MM', 粒度 MONTHLY/DAILY) 元组;
+            未设置时回退默认本月与按月粒度.
+        """
+        cycles = self._bill_cycle_options()
+        cycle = (
+            self._bill_cycle_select.value
+            if self._bill_cycle_select is not None
+            else None
+        )
+        granularity = (
+            self._bill_granularity.value
+            if self._bill_granularity is not None
+            else None
+        )
+        return (
+            cycle if cycle in cycles else cycles[0],
+            granularity
+            if granularity in _GRANULARITY_OPTIONS
+            else 'MONTHLY',
         )
 
     async def _run_refresh(
         self,
         platform: str,
         run_id: int,
+        bill_cycle: str,
+        granularity: str,
     ) -> None:
-        """后台并行拉取三类监控数据并渲染.
+        """后台拉取各类监控数据并渲染.
+
+        消费明细单独拉取并独立降级, 失败不影响余额/监控/
+        资金流水的展示.
 
         Args:
             platform: 目标平台标识快照.
             run_id: 启动时的运行代次号快照.
+            bill_cycle: 消费明细账期快照.
+            granularity: 消费明细粒度快照.
         """
         start_time = time.perf_counter()
         logger.info(
             '监控数据刷新开始 | platform={}', platform,
         )
         try:
-            balance, monitor, bills = (
+            balance, monitor, txs = (
                 await self._fetch_all(platform)
             )
+            # 代次校验: 新刷新已启动则丢弃陈旧结果.
+            if run_id != self._run_id:
+                return
+            self._render_balance(balance)
+            self._render_monitor(monitor)
+            self._render_transactions(txs)
+            # 消费明细: 独立降级, 失败不影响已渲染区域.
+            if platform == 'aliyun':
+                await self._refresh_instance_bills(
+                    run_id, bill_cycle, granularity,
+                )
             elapsed = time.perf_counter() - start_time
             logger.info(
                 '监控数据刷新完成 | platform={} '
                 '| 耗时 {:.1f}s',
                 platform, elapsed,
             )
-            # 代次校验
-            if run_id != self._run_id:
-                return
-            self._render_balance(balance)
-            self._render_monitor(monitor)
-            self._render_bills(bills)
             safe_notify(
                 self._container,
                 '监控数据刷新完成',
@@ -260,6 +419,48 @@ class MonitorPanel:
         finally:
             self._running = False
 
+    async def _refresh_instance_bills(
+        self,
+        run_id: int,
+        billing_cycle: str,
+        granularity: str,
+    ) -> None:
+        """独立拉取并渲染消费明细, 失败降级展示.
+
+        Args:
+            run_id: 本次刷新的运行代次号.
+            billing_cycle: 账期 'YYYY-MM'.
+            granularity: 聚合粒度 (MONTHLY/DAILY).
+        """
+        try:
+            kwargs = (
+                self._config_store.get_aliyun_client_kwargs()
+            )
+            client = AliyunKnowledgeClient(
+                **kwargs,  # type: ignore[arg-type]
+            )
+            if granularity == 'DAILY':
+                items = await (
+                    client.describe_instance_bill_daily_month(
+                        billing_cycle,
+                    )
+                )
+            else:
+                items = await client.describe_instance_bill(
+                    billing_cycle,
+                )
+            error: Exception | None = None
+        except Exception as exc:
+            logger.exception(
+                '消费明细拉取失败 | cycle={} | granularity={}'
+                ' | {}',
+                billing_cycle, granularity, exc,
+            )
+            items, error = [], exc
+        if run_id != self._run_id:
+            return
+        self._render_instance_bills(items, error)
+
     # --------------------------------------------------
     # 数据拉取
     # --------------------------------------------------
@@ -270,13 +471,13 @@ class MonitorPanel:
         KbMonitorSummary,
         list[BillDetailItem],
     ]:
-        """并行拉取余额、监控、账单三类数据.
+        """并行拉取余额、监控、资金流水三类数据.
 
         Args:
             platform: 目标平台标识.
 
         Returns:
-            (余额信息, 监控摘要, 账单明细列表) 元组.
+            (余额信息, 监控摘要, 资金流水列表) 元组.
         """
         if platform == 'volc':
             return await self._fetch_volc(platform)
@@ -295,7 +496,7 @@ class MonitorPanel:
             platform: 平台标识.
 
         Returns:
-            (余额, 监控摘要, 账单明细) 元组.
+            (余额, 监控摘要, 资金流水) 元组.
         """
         kwargs = self._config_store.get_aliyun_client_kwargs()
         client = AliyunKnowledgeClient(
@@ -333,12 +534,12 @@ class MonitorPanel:
                 raise r
         (
             balance, monitor_raw,
-            bills, doc_count,
+            txs, doc_count,
         ) = results  # type: ignore[misc]
         monitor = self._parse_aliyun_monitor(
             monitor_raw, platform, doc_count,
         )
-        return balance, monitor, bills
+        return balance, monitor, txs
 
     async def _fetch_volc(
         self, platform: str,
@@ -580,15 +781,15 @@ class MonitorPanel:
                 summary.update_time or '-',
             )
 
-    def _render_bills(
+    def _render_transactions(
         self, items: list[BillDetailItem],
     ) -> None:
-        """渲染账单明细表格.
+        """渲染资金流水表格.
 
         Args:
-            items: 账单明细 DTO 列表.
+            items: 资金流水明细 DTO 列表.
         """
-        if self._bill_table is None:
+        if self._tx_table is None:
             return
         rows = [
             {
@@ -601,7 +802,60 @@ class MonitorPanel:
             }
             for item in items
         ]
-        self._bill_table.rows = rows
+        self._tx_table.rows = rows
+
+    def _render_instance_bills(
+        self,
+        items: list[InstanceBillItem],
+        error: Exception | None,
+    ) -> None:
+        """渲染消费明细汇总条、状态行与表格.
+
+        Args:
+            items: 账单条目列表, 失败时为空列表.
+            error: 拉取异常, 为 None 表示成功.
+        """
+        if self._instance_table is None:
+            return
+        total_pretax = sum(i.pretax_amount for i in items)
+        total_payment = sum(i.payment_amount for i in items)
+        if self._bill_summary_row is not None:
+            self._bill_summary_row.clear()
+            with self._bill_summary_row:
+                ui.label(
+                    f'合计应付: {total_pretax:.2f}',
+                ).classes('font-bold')
+                ui.label(
+                    f'合计现金支付: {total_payment:.2f}',
+                )
+                ui.label(f'条目数: {len(items)}')
+        if self._bill_status_label is not None:
+            self._bill_status_label.text = (
+                f'消费明细拉取失败: {error_summary(error)}'
+                if error else ''
+            )
+        rows = []
+        for index, item in enumerate(items):
+            instance = item.instance_id or '-'
+            if item.billing_item:
+                instance = (
+                    f'{instance} / {item.billing_item}'
+                )
+            rows.append({
+                'key': str(index),
+                'date': (
+                    item.billing_date or item.billing_cycle
+                ),
+                'product': item.product_name,
+                'instance': instance,
+                'bill_type': _ITEM_TYPE_LABELS.get(
+                    item.item_type, item.item_type,
+                ),
+                'pretax': f'{item.pretax_amount:.2f}',
+                'discount': f'{item.invoice_discount:.2f}',
+                'payment': f'{item.payment_amount:.2f}',
+            })
+        self._instance_table.rows = rows
 
     # --------------------------------------------------
     # 辅助渲染
@@ -631,8 +885,14 @@ class MonitorPanel:
             self._balance_col.clear()
         if self._monitor_col is not None:
             self._monitor_col.clear()
-        if self._bill_table is not None:
-            self._bill_table.rows = []
+        if self._tx_table is not None:
+            self._tx_table.rows = []
+        if self._instance_table is not None:
+            self._instance_table.rows = []
+        if self._bill_summary_row is not None:
+            self._bill_summary_row.clear()
+        if self._bill_status_label is not None:
+            self._bill_status_label.text = ''
 
     def _refresh_btn_state(self) -> None:
         """根据 _running 状态刷新按钮灰化."""

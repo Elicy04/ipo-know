@@ -11,12 +11,15 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 
 import requests
+import tenacity
 from alibabacloud_bailian20231229 import models as bailian_models
 from alibabacloud_bailian20231229.client import Client as BailianClient
 from alibabacloud_bssopenapi20171214 import models as bss_models
@@ -26,6 +29,7 @@ from loguru import logger
 
 from ipo_know.clients.monitor_dto import BalanceInfo
 from ipo_know.clients.monitor_dto import BillDetailItem
+from ipo_know.clients.monitor_dto import InstanceBillItem
 from ipo_know.config.config import AliyunKnowledgeSettings
 from ipo_know.config.config import settings
 
@@ -59,6 +63,53 @@ DEFAULT_CATEGORY_PLACEHOLDER = 'default'
 
 # 非结构化数据中心的默认类目名称.
 DEFAULT_CATEGORY_NAME = '默认类目'
+
+# DescribeInstanceBill 单页条数上限, 取接口允许的最大值.
+INSTANCE_BILL_PAGE_SIZE = 300
+
+# 实例账单翻页防御上限: 超出即报错, 防止游标异常死循环.
+INSTANCE_BILL_MAX_PAGES = 200
+
+# 实例账单单次请求最大尝试次数 (含首次), 限流/服务端错误退避重试.
+INSTANCE_BILL_MAX_ATTEMPTS = 3
+
+
+def _is_retryable_bill_error(exc: BaseException) -> bool:
+    """判断实例账单请求异常是否值得重试.
+
+    仅对限流与服务端错误重试: 错误码/错误文案含 Throttling、
+    状态码 429 或 5xx; 无错误码的传输层异常 (网络超时/连接中断)
+    也重试. 参数错误等业务性错误为确定性结果, 重试无法改变,
+    直接上抛避免白耗退避时间.
+
+    Args:
+        exc: 待判定的异常对象.
+
+    Returns:
+        可重试时返回 True.
+    """
+    # 信封校验等业务性错误为确定性结果, 不重试.
+    if getattr(exc, '_bill_business_error', False):
+        return False
+    code = str(getattr(exc, 'code', '') or '')
+    message = str(getattr(exc, 'message', '') or '')
+    if 'Throttling' in code or 'Throttling' in message:
+        return True
+    status = getattr(exc, 'status_code', None)
+    if isinstance(status, int) and (status >= 500 or status == 429):
+        return True
+    # 无 code/status 属性的异常视为传输层错误, 重试.
+    return not code
+
+
+# 实例账单单页请求重试: 指数退避 1~10 秒, 业务性错误不重试.
+_RETRY_BILL_PAGE = tenacity.retry(
+    stop=tenacity.stop_after_attempt(INSTANCE_BILL_MAX_ATTEMPTS),
+    wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+    retry=tenacity.retry_if_exception(_is_retryable_bill_error),
+    reraise=True,
+    before_sleep=tenacity.before_sleep_log(logger, 'WARNING'),
+)
 
 
 @dataclass
@@ -1014,6 +1065,269 @@ class AliyunKnowledgeClient:
             len(all_items),
         )
         return all_items
+
+    @_RETRY_BILL_PAGE
+    async def _describe_instance_bill_page(
+        self,
+        billing_cycle: str,
+        *,
+        granularity: str,
+        billing_date: str | None,
+        is_billing_item: bool,
+        is_hide_zero_charge: bool,
+        next_token: str | None,
+    ) -> bss_models.DescribeInstanceBillResponseBody:
+        """查询实例账单单页并校验成功标志.
+
+        经全局限流器下发单次 DescribeInstanceBill 请求; 响应信封
+        success/code 不达标时抛 RuntimeError (限流与服务端错误由外
+        层重试装饰器判定重试, 业务性错误直接上抛).
+
+        Args:
+            billing_cycle: 账期 'YYYY-MM'.
+            granularity: 聚合粒度 (MONTHLY/DAILY).
+            billing_date: 账单日 'YYYY-MM-DD', 仅 DAILY 使用.
+            is_billing_item: 是否返回计费项/用量明细.
+            is_hide_zero_charge: 是否过滤零消费条目.
+            next_token: 分页游标, 首页传 None.
+
+        Returns:
+            校验通过的响应体.
+
+        Raises:
+            RuntimeError: 响应信封标记失败.
+        """
+        await self._rate_limiter.acquire()
+        request = bss_models.DescribeInstanceBillRequest(
+            billing_cycle=billing_cycle,
+            granularity=granularity,
+            billing_date=billing_date,
+            is_billing_item=is_billing_item,
+            is_hide_zero_charge=is_hide_zero_charge,
+            max_results=INSTANCE_BILL_PAGE_SIZE,
+            next_token=next_token,
+        )
+        response = await self._run_in_thread(
+            self._get_bss_client.describe_instance_bill,
+            request,
+        )
+        body = response.body
+        if not getattr(body, 'success', False) or (
+            getattr(body, 'code', '') != 'Success'
+        ):
+            error = RuntimeError(
+                '查询实例账单失败 | code={} | message={}'.format(
+                    getattr(body, 'code', ''),
+                    getattr(body, 'message', ''),
+                ),
+            )
+            # 标记业务性错误: 重试无法改变结果, 直接上抛.
+            error._bill_business_error = True  # type: ignore[attr-defined]
+            raise error
+        return body
+
+    async def describe_instance_bill(
+        self,
+        billing_cycle: str,
+        *,
+        granularity: str = 'MONTHLY',
+        billing_date: str | None = None,
+        is_billing_item: bool = False,
+        is_hide_zero_charge: bool = True,
+    ) -> list[InstanceBillItem]:
+        """游标分页查询实例级消费账单.
+
+        以 INSTANCE_BILL_PAGE_SIZE 为单页上限按 NextToken 翻页,
+        游标为空即读完; 页数超过 INSTANCE_BILL_MAX_PAGES 报错防死循
+        环; 中途异常不吸收向上抛出. DAILY 粒度要求 billing_date 与
+        账期同月, 参数不合法时直接报 ValueError.
+
+        Args:
+            billing_cycle: 账期 'YYYY-MM' (仅支持近 18 个月).
+            granularity: 聚合粒度 MONTHLY 或 DAILY.
+            billing_date: 账单日 'YYYY-MM-DD', 仅 DAILY 必填.
+            is_billing_item: 是否返回计费项/用量字段.
+            is_hide_zero_charge: 是否过滤零消费条目.
+
+        Returns:
+            全部账单条目 DTO 列表.
+
+        Raises:
+            ValueError: 粒度参数非法或账单日与账期不同月.
+            RuntimeError: 接口失败或翻页超出防御上限.
+        """
+        granularity = granularity.upper()
+        if granularity not in {'MONTHLY', 'DAILY'}:
+            raise ValueError(
+                f'不支持的账单粒度: {granularity}',
+            )
+        if granularity == 'DAILY':
+            if not billing_date:
+                raise ValueError(
+                    'DAILY 粒度必须提供账单日 (YYYY-MM-DD)',
+                )
+            if not billing_date.startswith(f'{billing_cycle}-'):
+                raise ValueError(
+                    '账单日与账期不同月 | '
+                    f'billing_date={billing_date} | '
+                    f'billing_cycle={billing_cycle}',
+                )
+        logger.debug(
+            '百炼 实例账单 调用 | cycle={} | granularity={}'
+            ' | billing_date={} | hide_zero={}',
+            billing_cycle, granularity,
+            billing_date or '-', is_hide_zero_charge,
+        )
+        items: list[InstanceBillItem] = []
+        next_token: str | None = None
+        page = 0
+        while True:
+            page += 1
+            if page > INSTANCE_BILL_MAX_PAGES:
+                raise RuntimeError(
+                    '实例账单翻页超出防御上限 '
+                    f'({INSTANCE_BILL_MAX_PAGES} 页) | '
+                    f'cycle={billing_cycle}',
+                )
+            body = await self._describe_instance_bill_page(
+                billing_cycle,
+                granularity=granularity,
+                billing_date=billing_date,
+                is_billing_item=is_billing_item,
+                is_hide_zero_charge=is_hide_zero_charge,
+                next_token=next_token,
+            )
+            data = body.data
+            for it in (data.items if data else None) or []:
+                items.append(
+                    self._to_instance_bill_item(
+                        it, billing_cycle,
+                    ),
+                )
+            logger.debug(
+                '百炼 实例账单 翻页 | 页={} | 本页={} 条'
+                ' | 累计={} 条 | total_count={}',
+                page,
+                len(data.items) if data and data.items else 0,
+                len(items),
+                data.total_count if data else 0,
+            )
+            next_token = (
+                data.next_token if data else None
+            )
+            if not next_token:
+                break
+        logger.info(
+            '百炼 实例账单 完成 | cycle={} | 共 {} 条',
+            billing_cycle, len(items),
+        )
+        return items
+
+    async def describe_instance_bill_daily_month(
+        self,
+        billing_cycle: str,
+        *,
+        is_billing_item: bool = False,
+        is_hide_zero_charge: bool = True,
+    ) -> list[InstanceBillItem]:
+        """按日粒度拉取整月实例账单并汇总.
+
+        以 calendar.monthrange 逐日循环调用单页方法; 当月仅查到今天,
+        未来日期不查 (费用数据延迟约 24h, 当天数据通常未出).
+        月内最多产生天数次单查询, 逐日限流下发.
+
+        Args:
+            billing_cycle: 账期 'YYYY-MM' (仅支持近 18 个月).
+            is_billing_item: 是否返回计费项/用量字段.
+            is_hide_zero_charge: 是否过滤零消费条目.
+
+        Returns:
+            整月全部账单条目 (按日序汇总).
+        """
+        year, month = (
+            int(p) for p in billing_cycle.split('-')
+        )
+        days_in_month = calendar.monthrange(year, month)[1]
+        today = date.today()
+        if year == today.year and month == today.month:
+            last_day = min(days_in_month, today.day)
+        else:
+            last_day = days_in_month
+        logger.info(
+            '百炼 实例账单 按日全月拉取 | cycle={} | '
+            '覆盖 1~{} 日',
+            billing_cycle, last_day,
+        )
+        all_items: list[InstanceBillItem] = []
+        for day in range(1, last_day + 1):
+            billing_date = f'{billing_cycle}-{day:02d}'
+            day_items = await self.describe_instance_bill(
+                billing_cycle,
+                granularity='DAILY',
+                billing_date=billing_date,
+                is_billing_item=is_billing_item,
+                is_hide_zero_charge=is_hide_zero_charge,
+            )
+            all_items.extend(day_items)
+        logger.info(
+            '百炼 实例账单 按日全月完成 | cycle={} | '
+            '共 {} 条',
+            billing_cycle, len(all_items),
+        )
+        return all_items
+
+    @staticmethod
+    def _to_instance_bill_item(
+        it: object,
+        billing_cycle: str,
+    ) -> InstanceBillItem:
+        """将 SDK 账单条目映射为 DTO (getattr 兜底).
+
+        SDK 条目模型 (DescribeInstanceBillResponseBodyDataItems)
+        无 billing_cycle 属性 (仅外层 Data 返回), 用调用方传入的
+        账期回填; 全部字段经 getattr 取值, SDK 版本字段增删不崩.
+        金额字段统一转 float, 缺失记 0.0.
+
+        Args:
+            it: SDK 账单条目对象.
+            billing_cycle: 调用方传入的账期 'YYYY-MM'.
+
+        Returns:
+            InstanceBillItem DTO.
+        """
+        def text(name: str) -> str:
+            return str(getattr(it, name, '') or '')
+
+        def money(name: str) -> float:
+            return float(getattr(it, name, None) or 0.0)
+
+        return InstanceBillItem(
+            # 条目无 billing_cycle 属性, 用请求参数回填.
+            billing_cycle=(
+                text('billing_cycle') or billing_cycle
+            ),
+            billing_date=text('billing_date'),
+            product_name=text('product_name'),
+            product_detail=text('product_detail'),
+            instance_id=text('instance_id'),
+            instance_spec=text('instance_spec'),
+            billing_item=text('billing_item'),
+            item_type=text('item'),
+            subscription_type=text('subscription_type'),
+            pretax_amount=money('pretax_amount'),
+            pretax_gross_amount=money('pretax_gross_amount'),
+            invoice_discount=money('invoice_discount'),
+            payment_amount=money('payment_amount'),
+            deducted_by_cash_coupons=money(
+                'deducted_by_cash_coupons',
+            ),
+            deducted_by_prepaid_card=money(
+                'deducted_by_prepaid_card',
+            ),
+            currency=text('currency'),
+            usage=money('usage'),
+            usage_unit=text('usage_unit'),
+        )
 
     @staticmethod
     def _collect_failed_documents(
