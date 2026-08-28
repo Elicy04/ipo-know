@@ -24,6 +24,7 @@ dependencies = [
     "tenacity>=9.1.4",
     "vikingdb-python-sdk>=0.1.28",
     "volcengine>=1.0.227",
+    "markdown-pdf>=1.13.3",
 ]
 
 [project.scripts]

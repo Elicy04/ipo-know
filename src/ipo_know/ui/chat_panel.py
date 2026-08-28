@@ -14,8 +14,11 @@
 """
 
 import asyncio
+import subprocess
 import threading
 from collections import deque
+from datetime import datetime
+from pathlib import Path
 
 import httpx
 from loguru import logger
@@ -23,6 +26,10 @@ from nicegui import background_tasks
 from nicegui import ui
 from nicegui.events import ScrollEventArguments
 
+from ipo_know.export.assembler import assemble_export_document
+from ipo_know.export.assembler import sanitize_filename
+from ipo_know.export.llm_summary import summarize_and_name
+from ipo_know.export.md_to_pdf import convert_markdown_to_pdf
 from ipo_know.kb_query import SearchHit
 from ipo_know.kb_query import create_query_backend
 from ipo_know.ui.config_store import GUIConfigStore
@@ -135,6 +142,8 @@ class ChatPanel:
             tool_return 合并计数, 展示于折叠区标题).
         _references_shown: 引用来源已展示条数 (展示上限
             内实际渲染的条数).
+        _ref_names: 本轮已接收引用来源的名称列表 (PDF
+            导出时写入引用来源小节).
         _scroll_top_offset: 末次滚动事件的距底像素缓存.
         _scroll_bottom_percent: 末次滚动事件的滚动百分比缓存.
         _scroll_event_seen: 是否已收到过滚动事件.
@@ -181,6 +190,7 @@ class ChatPanel:
         self._references_expansion: ui.expansion | None = None
         self._references_count: int = 0
         self._references_shown: int = 0
+        self._ref_names: list[str] = []
         self._scroll_top_offset: float = 0.0
         self._scroll_bottom_percent: float = 1.0
         self._scroll_event_seen: bool = False
@@ -520,6 +530,7 @@ class ChatPanel:
         self._references_expansion = None
         self._references_count = 0
         self._references_shown = 0
+        self._ref_names = []
         self._scroll_top_offset = 0.0
         self._scroll_bottom_percent = 1.0
         self._scroll_event_seen = False
@@ -592,6 +603,7 @@ class ChatPanel:
         self._references_expansion = None
         self._references_count = 0
         self._references_shown = 0
+        self._ref_names = []
         self._buffer = ''
         self._flushed_length = 0
         self._degraded = False
@@ -914,6 +926,10 @@ class ChatPanel:
         if bubble is None or not hits:
             return
         self._references_count += len(hits)
+        self._ref_names.extend(
+            hit.doc_name or hit.title or '(未命名)'
+            for hit in hits
+        )
         if self._references_expansion is not None:
             self._append_reference_labels(
                 self._references_expansion, hits
@@ -1000,7 +1016,134 @@ class ChatPanel:
                 ui.label(stamp).classes(
                     'mt-1 text-xs text-gray-500'
                 )
+        # 阿里云平台完整回答追加 PDF 导出入口 (用量之后)
+        if (
+            self._platform == 'aliyun'
+            and self._buffer
+            and not stopped
+            and self._current_bubble is not None
+        ):
+            with self._current_bubble:
+                ui.button(
+                    icon='picture_as_pdf',
+                    on_click=self._on_export_pdf,
+                ).props(
+                    'flat dense size=sm'
+                ).classes('text-gray-400').tooltip(
+                    '导出为 PDF'
+                )
         self._scroll_to_bottom()
+
+    # --------------------------------------------------
+    # PDF 导出 (仅阿里云平台)
+    # --------------------------------------------------
+    def _on_export_pdf(self) -> None:
+        """点击导出 PDF 按钮: 启动后台导出任务."""
+        background_tasks.create(
+            self._run_export_pdf(), name='pdf export'
+        )
+
+    async def _run_export_pdf(self) -> None:
+        """后台执行 PDF 导出流水线.
+
+        流程: LLM 摘要命名 (失败降级默认标题) → 组装完整
+        Markdown 文档 → 转线程渲染 PDF → 通知并打开导出目录.
+        """
+        try:
+            # 快照当前回答数据, 避免与后续轮次竞态
+            answer_md = self._buffer
+            question = ''
+            for msg in reversed(self._history):
+                if msg.get('role') == 'user':
+                    question = msg.get('content', '')
+                    break
+            timestamp = datetime.now().strftime(
+                '%Y-%m-%d %H:%M'
+            )
+            usage_text = self._format_usage()
+            references = list(self._ref_names)
+
+            # 摘要所需配置取自阿里云知识库配置区
+            store_data = self._store.load()
+            raw = store_data.get('aliyun_knowledge', {})
+            aliyun_cfg = raw if isinstance(raw, dict) else {}
+            api_key = str(aliyun_cfg.get('api_key') or '')
+            workspace_id = str(
+                aliyun_cfg.get('workspace_id') or ''
+            )
+            region_id = str(
+                aliyun_cfg.get('region_id') or 'cn-beijing'
+            )
+
+            # Step 1: LLM 摘要与命名 (失败降级空串)
+            logger.info('PDF 导出开始 | 摘要调用中...')
+            file_name, summary_text = await summarize_and_name(
+                answer_md=answer_md,
+                question=question,
+                api_key=api_key,
+                workspace_id=workspace_id,
+                region_id=region_id,
+            )
+            if not file_name:
+                # 降级: 摘要失败时用提问前 20 字命名
+                fallback = (
+                    question[:20] if question else '对话记录'
+                )
+                file_name = sanitize_filename(fallback)
+
+            # Step 2: 组装完整导出文档
+            doc_md = assemble_export_document(
+                answer_md=answer_md,
+                question=question,
+                platform='阿里云',
+                timestamp=timestamp,
+                usage_text=usage_text,
+                references=references,
+                file_name=file_name,
+                summary_text=summary_text,
+            )
+
+            # Step 3: 渲染 PDF (重名自动追加序号)
+            export_dir = (
+                Path(__file__).resolve().parents[3]
+                / 'data' / 'exports'
+            )
+            export_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = sanitize_filename(file_name)
+            out_path = export_dir / f'{safe_name}.pdf'
+            counter = 1
+            while out_path.exists():
+                out_path = export_dir / (
+                    f'{safe_name}({counter}).pdf'
+                )
+                counter += 1
+            logger.info(
+                'PDF 导出转换中 | file={}', out_path.name,
+            )
+            await asyncio.to_thread(
+                convert_markdown_to_pdf, doc_md, out_path,
+            )
+            safe_notify(
+                self._container,
+                f'PDF 已导出: {out_path.name}',
+                type='positive',
+            )
+            # 打开导出目录 (失败仅告警, 不影响导出结果)
+            try:
+                subprocess.Popen(
+                    ['explorer', str(export_dir)]
+                )
+            except OSError as exc:
+                logger.warning(
+                    '导出目录打开失败 | {}', exc,
+                )
+        except Exception as exc:
+            logger.error('PDF 导出失败 | {}', exc)
+            safe_notify(
+                self._container,
+                f'PDF 导出失败: {exc}',
+                type='negative',
+            )
 
     def _mark_bubble_failed(self, summary: str) -> None:
         """在当前消息标记生成失败.
