@@ -1,7 +1,7 @@
 """临时脚本: 清空阿里云百炼知识库 (初始化用).
 
 删除知识库索引中的全部文档, 并同步删除对应数据中心文件
-(索引内文件与本地映射记录的文件取并集). 阿里云切片随索引文档
+(索引内文件与数据中心列举全量取并集). 阿里云切片随索引文档
 删除而删除, 不单独处理孤儿切片; 执行前需输入 DELETE 二次确认,
 --dry-run 仅盘点数量不删除.
 
@@ -37,7 +37,7 @@ async def main() -> None:
 
     print('\n' + '=' * 62)
     print(f'盘点: 索引文档 {report.total_docs} 篇 | '
-          f'本地映射 {report.total_mapped_files} 条')
+          f'数据中心文件 {report.total_data_files} 个')
     if not dry_run:
         print(f'已删除: 索引文档 {report.deleted_docs} 篇 | '
               f'数据中心文件 {report.deleted_files} 个')

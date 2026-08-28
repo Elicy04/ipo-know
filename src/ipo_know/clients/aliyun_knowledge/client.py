@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import requests
 from alibabacloud_bailian20231229 import models as bailian_models
@@ -35,11 +36,46 @@ POLL_INTERVAL_SECONDS = 5
 # 单文件解析等待上限: 招股书 PDF 体积大, 解析可能耗时较长.
 PARSE_POLL_TIMEOUT_SECONDS = 600
 
+# 文件处理失败终态集合: 命中任一即终止等待并报错.
+# 注意 IN_PARSE_QUEUE 为排队中间态, 不属于失败.
+FILE_FAILED_STATUSES = frozenset({
+    'PARSE_FAILED',
+    'SAFE_CHECK_FAILED',
+    'INDEX_BUILDING_FAILED',
+    'FILE_EXPIRED',
+})
+
 # 入索引任务等待上限: 任务包含解析结果入库与向量化.
 JOB_POLL_TIMEOUT_SECONDS = 1800
 
 # 百炼 API 全局限流: 官方限流说明为 10 次/秒, 预留余量取 8.
 API_RATE_LIMIT_PER_SECOND = 8
+
+# ListFile 单页条数上限, 取接口允许的最大值减少分页次数.
+LIST_FILE_PAGE_SIZE = 200
+
+# 类目配置占位符: 需经 ListCategory 解析出默认类目真实 ID.
+DEFAULT_CATEGORY_PLACEHOLDER = 'default'
+
+# 非结构化数据中心的默认类目名称.
+DEFAULT_CATEGORY_NAME = '默认类目'
+
+
+@dataclass
+class DataCenterFileItem:
+    """数据中心文件轻量结构, 与 SDK 响应类型解耦.
+
+    Attributes:
+        file_id: 百炼数据中心文件 ID.
+        status: 文件处理状态.
+        tags: 文件标签列表.
+        file_name: 文件名.
+    """
+
+    file_id: str
+    status: str
+    tags: list[str]
+    file_name: str
 
 
 class _ApiRateLimiter:
@@ -83,6 +119,8 @@ class AliyunKnowledgeClient:
     Attributes:
         _config: 百炼知识库配置.
         _client: 底层 BailianClient 同步客户端 (懒加载).
+        _resolved_category_id: ListFile 用真实类目 ID 缓存,
+            仅首次解析一次.
     """
 
     def __init__(
@@ -98,6 +136,7 @@ class AliyunKnowledgeClient:
         self._config = config or settings.aliyun_knowledge
         self._client: BailianClient | None = None
         self._bss_client: BssClient | None = None
+        self._resolved_category_id: str | None = None
         self._rate_limiter = _ApiRateLimiter(API_RATE_LIMIT_PER_SECOND)
         logger.info(
             '百炼知识库客户端初始化 | endpoint={} | workspace={}',
@@ -157,6 +196,11 @@ class AliyunKnowledgeClient:
                 '百炼知识库 ID 未配置，请通过 GUI 配置填写'
             )
         return self._config.index_id
+
+    @property
+    def category_id(self) -> str:
+        """数据中心类目 ID, 配置总有默认值."""
+        return self._config.category_id
 
     @property
     def region_id(self) -> str:
@@ -261,6 +305,108 @@ class AliyunKnowledgeClient:
             self.workspace_id,
             request,
         )
+
+    async def _resolve_list_category_id(self) -> str:
+        """解析 ListFile 使用的真实类目 ID.
+
+        ListFile 的 category_id 必须为真实类目 ID, 配置中的占位符
+        'default' 需经 ListCategory 查询默认类目解析; 解析结果缓存,
+        仅首次请求生效.
+
+        Returns:
+            可直接用于 ListFile 的类目 ID.
+
+        Raises:
+            RuntimeError: 业务空间下未找到任何非结构化类目.
+        """
+        if self._resolved_category_id:
+            return self._resolved_category_id
+        configured = self._config.category_id
+        if configured and configured != DEFAULT_CATEGORY_PLACEHOLDER:
+            self._resolved_category_id = configured
+            return configured
+
+        resp = await self._api_call(
+            self._get_client().list_category,
+            self.workspace_id,
+            bailian_models.ListCategoryRequest(
+                category_type='UNSTRUCTURED',
+            ),
+        )
+        data = resp.body.data
+        cats = data.category_list if data else None
+        if cats:
+            for cat in cats:
+                if cat.category_name == DEFAULT_CATEGORY_NAME:
+                    self._resolved_category_id = cat.category_id
+                    logger.info(
+                        '默认类目真实 ID 解析完成 | category_id={}',
+                        cat.category_id,
+                    )
+                    return cat.category_id
+            self._resolved_category_id = cats[0].category_id
+            logger.info(
+                '未找到默认类目, 退回首类目 | category_id={}',
+                cats[0].category_id,
+            )
+            return cats[0].category_id
+        raise RuntimeError('未找到任何非结构化类目')
+
+    async def list_all_data_center_files(
+        self,
+    ) -> list[DataCenterFileItem]:
+        """游标分页拉取数据中心全部文件.
+
+        以 LIST_FILE_PAGE_SIZE 为单页上限按 next_token 翻页, 直到无后续页;
+        分页中途的接口异常不吸收, 直接向上抛出由调用方 fail-fast.
+
+        Returns:
+            全部文件的轻量结构列表, 每条含 file_id / status /
+            tags / file_name.
+        """
+        category_id = await self._resolve_list_category_id()
+        files: list[DataCenterFileItem] = []
+        next_token: str | None = None
+        page = 0
+        while True:
+            page += 1
+            request = bailian_models.ListFileRequest(
+                category_id=category_id,
+                max_results=LIST_FILE_PAGE_SIZE,
+            )
+            if next_token:
+                request.next_token = next_token
+            resp = await self.list_file(request)
+            data = resp.body.data
+            if data and data.file_list:
+                for item in data.file_list:
+                    files.append(
+                        DataCenterFileItem(
+                            file_id=item.file_id or '',
+                            status=item.status or '',
+                            tags=list(item.tags) if item.tags else [],
+                            file_name=item.file_name or '',
+                        ),
+                    )
+            logger.debug(
+                '数据中心文件分页列举 | 页={} | 累计={} 个',
+                page, len(files),
+            )
+            if data and data.has_next:
+                if not data.next_token:
+                    # has_next 但缺游标: 继续翻页不可能, 静默终止会产
+                    # 生半量快照, 与 fail-fast 语义不符, 直接报错中止.
+                    raise RuntimeError(
+                        'ListFile 返回 has_next 但缺少 next_token, '
+                        '中止以防半量快照',
+                    )
+                next_token = data.next_token
+            else:
+                break
+        logger.info(
+            '数据中心文件列举完成 | 共 {} 个', len(files),
+        )
+        return files
 
     async def delete_files(
         self,

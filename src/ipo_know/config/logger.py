@@ -16,9 +16,8 @@ from ipo_know.config.config import app_root
 def default_log_dir() -> Path:
     """计算默认日志目录.
 
-    返回 ``app_root()/logs``, 与 FileMappingStore /
-    GUIConfigStore 的存储策略一致. 这样在冻结产物从快捷方式/
-    开始菜单启动、工作目录不可控时日志仍写入固定位置.
+    返回 ``app_root()/logs``, 与 GUIConfigStore 的存储根目录策略一致.
+    这样在冻结产物从快捷方式/开始菜单启动、工作目录不可控时日志仍写入固定位置.
 
     Returns:
         Path: 默认日志目录路径 (尚未创建, 由调用方负责创建).

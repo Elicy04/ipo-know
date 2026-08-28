@@ -4,29 +4,28 @@
 百炼知识库做全量对齐:
 
 - 有效清单中存在而知识库缺失的文档, 下载 PDF 后经租约上传至
-  数据中心, 解析完成后加入索引, 并在本地映射中记录
-  fileId 与阿里云 FileId 的对应关系;
+  数据中心, 解析完成后加入索引;
 - 知识库中存在而不在有效清单内的文档, 从索引删除后连带删除
   数据中心文件.
 
-三所 (SSE/BSE/SZSE) 共用同一知识库, 孤儿判定按标签隔离:
-仅标签含 {source}_ 前缀的文档进入删除候选, 其他来源文档
-一律跳过. 索引文档列表接口不返回标签, 标签经数据中心文件
-详情 (DescribeFile) 逐篇查询获得.
+本地映射已废弃, 文件对应关系改由云端标签锚点承载: 上传时为每
+个文件写入 ``fileid_`` 哈希锚点等标签 (锚点为哈希而非原始 fileId,
+见 ``aliyun_tags``), 对齐时并行拉取索引文档与数据中心文件两份只读快
+照, 从标签反向解析锚点哈希并在本地用同一函数换算匹配, 构建倒排索引.
+中断重跑不产生重复上传: 已上传未
+入索引的文件按快照状态续接 (解析成功直接入索引 / 处理中续接等
+待 / 失败态删除后重传).
 
-阿里云知识库 ID 由平台生成不可自定义, 项目归属通过文件标签
-表达 ({source}_{公司简称}_{审核ID}), fileId 对应关系依赖本地映射.
-
-映射在文件上传成功时即写入落盘, 因此中断重跑不会产生重复
-上传: 已映射但未入索引的文件走断点续传, 直接续接解析等待
-与批量入索引.
+三所 (SSE/BSE/SZSE) 共用同一知识库, 孤儿判定按标签隔离: 仅标签
+含本交易所裸标签的文档进入删除候选, 无标签 / 他来源 / 查无此文
+件的文档一律跳过 (保守隔离).
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import pathlib
+from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
@@ -37,15 +36,15 @@ import tenacity
 from alibabacloud_bailian20231229 import models as bailian_models
 from loguru import logger
 
+from ipo_know.clients.aliyun_knowledge.client import FILE_FAILED_STATUSES
 from ipo_know.clients.aliyun_knowledge.client import AliyunKnowledgeClient
-from ipo_know.config.config import app_root
+from ipo_know.clients.aliyun_knowledge.client import DataCenterFileItem
+from ipo_know.kb_align.aliyun_tags import build_file_tags
+from ipo_know.kb_align.aliyun_tags import extract_fileid
+from ipo_know.kb_align.aliyun_tags import fileid_anchor
+from ipo_know.kb_align.aliyun_tags import has_source_tag
 from ipo_know.kb_align.volc_aligner import build_doc_name
 
-
-# 本地映射文件名: 按数据来源区分, 存放于与 SQLite 数据库相同的本地应用数据目录.
-def _mapping_file_name(source: str) -> str:
-    """按数据来源生成映射文件名."""
-    return f'aliyun_kb_mapping_{source}.json'
 
 # 分页查询单页大小: list_index_documents 按页码分页拉全量.
 LIST_PAGE_SIZE = 100
@@ -79,20 +78,37 @@ _DOWNLOAD_HEADERS: dict[str, str] = {
 _FILE_EXT = '.pdf'
 _MAX_FILE_NAME_LEN = 128
 
+# 数据中心文件解析处理中状态集合: 仍在上传/解析流水线中的中间
+# 态, 续接时经 wait_file_parsed 实时等待, 孤儿清理一律跳过以防
+# 误杀在途任务.
+_PARSE_PENDING_STATUSES = frozenset({
+    'INIT',
+    'UPLOADING',
+    'UPLOADED',
+    'PARSING',
+    'IN_PARSE_QUEUE',
+})
 
-def build_project_tag(record: Mapping[str, Any], source: str = 'sse') -> str:
-    """生成项目归属标签: {source}_{公司简称}_{审核ID}.
+# 本应用已知交易所来源: 三所共用同一知识库, 本应用上传的文件均
+# 携带其一的裸标签, 用于清库时识别本应用管理的文件.
+_APP_SOURCES = ('sse', 'bse', 'szse')
 
-    阿里云知识库不使用 category 层级, 以标签区分项目.
+
+def has_app_tags(tags: Iterable[str]) -> bool:
+    """判断云端文件标签是否属于本应用管理.
+
+    含 ``fileid_`` 锚点标签, 或含任一交易所裸来源标签即视为本应
+    用上传的文件; 两者皆无的视为外部文件 (如控制台手工上传).
 
     Args:
-        record: 有效文件清单条目 (FileItem 转字典).
-        source: 数据来源标识, 如 'sse'/'bse'/'szse'.
+        tags: 云端文件的标签列表.
 
     Returns:
-        项目标签, 如 sse_天博智能_2160 或 bse_杰锋动力_719.
+        属于本应用管理时返回 True.
     """
-    return f'{source}_{record["companyAbbr"]}_{record["auditId"]}'
+    return bool(extract_fileid(tags)) or any(
+        has_source_tag(tags, src) for src in _APP_SOURCES
+    )
 
 
 def build_file_name(record: Mapping[str, Any]) -> str:
@@ -111,119 +127,6 @@ def build_file_name(record: Mapping[str, Any]) -> str:
     return f'{base[:max_base]}{_FILE_EXT}'
 
 
-class FileMappingStore:
-    """fileId 与阿里云 FileId 的本地映射存储.
-
-    JSON 文件默认存放于本地应用数据目录 (与 SQLite 数据库
-    同级), 格式为 {fileId: 阿里云FileId}, 每次变更即落盘.
-
-    Attributes:
-        _path: 映射文件路径.
-        _data: 内存中的映射字典.
-    """
-
-    def __init__(
-        self,
-        path: pathlib.Path | str | None = None,
-        source: str = 'sse',
-    ) -> None:
-        """初始化映射存储并加载已有映射.
-
-        Args:
-            path: 映射文件路径, 为 None 时使用本地应用数据目录
-                下的默认位置 (按 source 区分).
-            source: 数据来源标识, 用于生成默认映射文件名.
-        """
-        if path is None:
-            path = app_root() / 'data' / _mapping_file_name(source)
-        self._path = pathlib.Path(path)
-        self._data: dict[str, str] = {}
-        self._load()
-
-    @property
-    def path(self) -> pathlib.Path:
-        """映射文件路径."""
-        return self._path
-
-    def __len__(self) -> int:
-        """返回映射条目数."""
-        return len(self._data)
-
-    def __contains__(self, file_id: str) -> bool:
-        """判断 fileId 是否已有映射."""
-        return file_id in self._data
-
-    def get(self, file_id: str) -> str | None:
-        """返回 fileId 对应的阿里云 FileId.
-
-        Args:
-            file_id: 文件唯一 ID.
-
-        Returns:
-            阿里云 FileId; 无映射时返回 None.
-        """
-        return self._data.get(file_id)
-
-    def items(self) -> list[tuple[str, str]]:
-        """返回全部映射条目 (fileId, 阿里云FileId)."""
-        return list(self._data.items())
-
-    def find_file_id_by_aliyun_id(self, aliyun_id: str) -> str | None:
-        """按阿里云 FileId 反查 fileId.
-
-        Args:
-            aliyun_id: 阿里云 FileId.
-
-        Returns:
-            fileId; 无映射时返回 None.
-        """
-        for file_id, mapped in self._data.items():
-            if mapped == aliyun_id:
-                return file_id
-        return None
-
-    def set(self, file_id: str, aliyun_id: str) -> None:
-        """写入一条映射并落盘.
-
-        Args:
-            file_id: 文件唯一 ID.
-            aliyun_id: 阿里云 FileId.
-        """
-        self._data[file_id] = aliyun_id
-        self._save()
-
-    def remove(self, file_id: str) -> None:
-        """删除一条映射并落盘, 不存在时忽略.
-
-        Args:
-            file_id: 文件唯一 ID.
-        """
-        if file_id in self._data:
-            del self._data[file_id]
-            self._save()
-
-    def _load(self) -> None:
-        """从磁盘加载映射文件, 不存在或损坏时视为空映射."""
-        if not self._path.exists():
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding='utf-8'))
-            if isinstance(raw, dict):
-                self._data = {
-                    str(k): str(v) for k, v in raw.items()
-                }
-        except (OSError, ValueError) as exc:
-            logger.warning('映射文件读取失败, 按空映射处理 | {}', exc)
-
-    def _save(self) -> None:
-        """将当前映射写回磁盘."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(self._data, ensure_ascii=False, indent=2),
-            encoding='utf-8',
-        )
-
-
 @dataclass
 class AliyunAlignReport:
     """阿里云知识库对齐执行结果报告.
@@ -231,11 +134,12 @@ class AliyunAlignReport:
     Attributes:
         total_kb_docs: 对齐前知识库中的文档总数.
         valid_count: 有效文件清单条目数.
-        to_add_count: 待补充文档数.
-        to_delete_count: 待删除文档数.
+        to_add_count: 待补充文档数 (续接 + 全新上传).
+        to_delete_count: 待删除的索引孤儿文档数.
         dry_run: 是否为预演模式.
         added: 实际补充成功的 fileId 列表.
-        deleted: 实际删除成功的阿里云 FileId 列表.
+        deleted: 实际删除成功的阿里云 FileId 列表, 含索引孤儿
+            文档与数据中心残留文件两类.
         failed_adds: 补充失败项, (fileId, 原因).
         failed_deletes: 删除失败项, (阿里云FileId, 原因).
     """
@@ -255,20 +159,27 @@ class AliyunAlignReport:
 class AliyunPurgeReport:
     """阿里云知识库清库执行结果报告.
 
+    清库仅删除索引全部文档与「有本应用标签」的数据中心文件;
+    无本应用标签 (无 fileid_ 锚点且无交易所裸来源标签) 的外部文
+    件 (如控制台手工上传) 一律排除保留, 只统计告警, 收敛破坏半径.
+
     Attributes:
         dry_run: 是否为预演模式.
         total_docs: 清库前知识库文档总数.
-        total_mapped_files: 清库前本地映射条目数.
+        total_data_files: 清库前数据中心文件总数.
         deleted_docs: 实际从索引删除的文档数.
         deleted_files: 实际从数据中心删除的文件数.
+        excluded_external_files: 无本应用标签而排除保留的数据中心文
+            件数.
         failed: 删除失败项, (文档或文件 ID, 原因).
     """
 
     dry_run: bool = False
     total_docs: int = 0
-    total_mapped_files: int = 0
+    total_data_files: int = 0
     deleted_docs: int = 0
     deleted_files: int = 0
+    excluded_external_files: int = 0
     failed: list[tuple[str, str]] = field(default_factory=list)
 
 
@@ -277,30 +188,28 @@ class AliyunKBAligner:
 
     以有效文件清单为准, 补齐知识库缺失文档并删除无关文档.
     文档增删均需经过上传/解析/入索引的异步流程, 由客户端内部
-    轮询等待完成.
+    轮询等待完成. 文件对应关系依赖云端 ``fileid_`` 标签锚点,
+    本地不持久化任何映射.
 
     Attributes:
+        _source: 数据来源标识, 决定上传标签与孤儿判定前缀.
         _client: 百炼知识库异步客户端.
-        _mapping: fileId 本地映射存储.
     """
 
     def __init__(
         self,
         source: str = 'sse',
         client: AliyunKnowledgeClient | None = None,
-        mapping: FileMappingStore | None = None,
     ) -> None:
         """初始化对齐器.
 
         Args:
             source: 数据来源标识 ('sse'/'bse'/'szse'), 影响
-                项目标签前缀和映射文件路径.
+                上传标签与孤儿判定的交易所裸标签.
             client: 百炼知识库客户端, 为 None 时使用默认配置新建.
-            mapping: fileId 映射存储, 为 None 时按 source 生成默认路径.
         """
         self._source = source
         self._client = client or AliyunKnowledgeClient()
-        self._mapping = mapping or FileMappingStore(source=source)
 
     # ==================================================
     # 全量查询
@@ -346,44 +255,68 @@ class AliyunKBAligner:
         valid_files: list[dict[str, Any]],
         *,
         dry_run: bool = False,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> AliyunAlignReport:
         """以有效文件清单为基准全量对齐知识库.
 
-        通过本地映射判断清单文件状态: 已映射且已入索引的直接
-        保留; 已映射但未入索引的走断点续传 (不重传, 续接解析
-        等待与批量入索引); 无映射的走完整上传流程.
+        并行拉取索引文档与数据中心文件两份只读快照, 任一列举
+        失败异常向上抛出整体中止, 绝不持半量快照进入删除阶段.
 
-        孤儿删除按标签隔离: 三所共用同一知识库, 仅标签含当前
-        {source}_ 前缀且无法对应到有效清单的文档才删除, 其他
-        来源 (含无标签/标签不可读) 的文档一律跳过.
+        通过云端 ``fileid_`` 哈希锚点标签判断清单文件状态: 命中且已
+        入索引的直接保留; 命中但未入索引的按快照状态续接 (解析
+        成功直接入索引 / 处理中续接等待 / 失败态删除后重传); 无
+        标签命中的走完整上传流程.
+
+        孤儿删除按标签隔离: 三所共用同一知识库, 仅标签含本交易
+        所裸标签且无法对应到有效清单的文档才删除, 无标签 / 他
+        来源 / 查无此文件的文档一律跳过.
 
         Args:
             valid_files: crawler collect 返回的有效文件清单.
             dry_run: 为 True 时只输出差异不执行增删.
+            on_progress: 可选进度回调 (已完成篇数, 待补充总篇数);
+                续接与上传阶段每完成一篇回调一次, 分母随降级重传动态增长.
+                预演模式不回调.
 
         Returns:
             对齐执行结果报告.
         """
-        index_docs = await self.list_all_index_documents()
+        index_docs, data_files = await asyncio.gather(
+            self.list_all_index_documents(),
+            self._client.list_all_data_center_files(),
+        )
         index_ids = {doc.id for doc in index_docs if doc.id}
 
+        files_by_anchor, tags_by_aliyun_id = self._build_snapshot(
+            data_files, index_ids,
+        )
+
         keep_ids: set[str] = set()
-        resume: list[tuple[dict[str, Any], str]] = []
+        resume: list[tuple[dict[str, Any], DataCenterFileItem]] = []
         fresh: list[dict[str, Any]] = []
         for record in valid_files:
-            aliyun_id = self._mapping.get(record['fileId'])
-            if not aliyun_id:
+            # 本地换算同一哈希后查倒排索引, 与打标侧同函数同 strip 语义
+            anchor = fileid_anchor(record['fileId'])
+            item = files_by_anchor.get(anchor)
+            if item is None:
                 fresh.append(record)
-            elif aliyun_id in index_ids:
-                keep_ids.add(aliyun_id)
+            elif item.file_id in index_ids:
+                keep_ids.add(item.file_id)
             else:
-                # 已映射未入索引: 上传后中断的断点续传对象
-                resume.append((record, aliyun_id))
+                # 已上传未入索引: 按快照状态走续接
+                resume.append((record, item))
 
         candidates = [
             doc for doc in index_docs if doc.id not in keep_ids
         ]
-        to_delete = await self._filter_by_source_tag(candidates)
+        to_delete = self._filter_by_source_tag(
+            candidates, tags_by_aliyun_id,
+        )
+
+        matched_ids = {item.file_id for item in files_by_anchor.values()}
+        residual = self._residual_data_files(
+            data_files, index_ids, matched_ids,
+        )
 
         report = AliyunAlignReport(
             total_kb_docs=len(index_ids),
@@ -392,27 +325,49 @@ class AliyunKBAligner:
             to_delete_count=len(to_delete),
             dry_run=dry_run,
         )
-        skipped = len(candidates) - len(to_delete)
         logger.info(
-            '对齐差异 | 知识库 {} 篇 | 有效清单 {} 篇 | '
-            '待补充 {} 篇 (断点续传 {} 篇) | 待删除 {} 篇 | '
-            '跳过非本来源文档 {} 篇',
-            len(index_ids), len(valid_files),
-            len(resume) + len(fresh), len(resume), len(to_delete),
-            skipped,
+            '对齐差异 | 索引 {} 篇 | 数据中心 {} 个 | 有效清单 {} 篇 | '
+            '待补充 {} 篇 (续接 {} 篇) | 待删除索引文档 {} 篇 | '
+            '待清理残留文件 {} 个',
+            len(index_ids), len(data_files), len(valid_files),
+            len(resume) + len(fresh), len(resume),
+            len(to_delete), len(residual),
         )
 
         if dry_run:
-            self._log_dry_run(fresh, resume, to_delete)
+            self._log_dry_run(fresh, resume, to_delete, residual)
             return report
 
-        parsed = await self._resume_mapped(resume, fresh, report)
-        parsed.extend(await self._upload_all(fresh, report))
+        # 单篇完成计数: 续接与上传两阶段共用同一计数盒,
+        # 分母取续接+重传队列实时长度 (降级重传会动态增长).
+        on_item_done: Callable[[], None] | None
+        if on_progress is None:
+            on_item_done = None
+        else:
+            cb = on_progress
+            done_box = [0]
+
+            def on_item_done() -> None:
+                done_box[0] += 1
+                cb(done_box[0], len(resume) + len(fresh))
+
+        parsed = await self._resume_cloud(
+            resume, fresh, report, on_item_done,
+        )
+        parsed.extend(
+            await self._upload_all(fresh, report, on_item_done)
+        )
         await self._index_parsed(parsed, report)
 
         total_delete = len(to_delete)
         for idx, doc in enumerate(to_delete, 1):
             await self._remove_doc(doc, report, idx, total_delete)
+
+        total_residual = len(residual)
+        for idx, item in enumerate(residual, 1):
+            await self._remove_residual_file(
+                item, report, idx, total_residual,
+            )
 
         logger.info(
             '对齐完成 | 补充 {} 篇 | 删除 {} 篇 | '
@@ -422,170 +377,280 @@ class AliyunKBAligner:
         )
         return report
 
-    async def _filter_by_source_tag(
+    def _build_snapshot(
+        self,
+        data_files: list[DataCenterFileItem],
+        index_ids: set[str],
+    ) -> tuple[dict[str, DataCenterFileItem], dict[str, list[str]]]:
+        """由数据中心快照构建两张内存查找表.
+
+        倒排索引 {锚点哈希 -> 云端文件} 经 ``fileid_`` 标签解析获
+        得, key 为哈希锚点而非原始 fileId; 发现重复锚点 (同一哈希对
+        应多个云端文件, 含哈希碰撞与重复上传) 时告警并保留已入索引者,
+        其余交由孤儿/残留清理.
+
+        Args:
+            data_files: 数据中心全量文件快照.
+            index_ids: 索引文档 ID 集合, 用于重复锚点取舍.
+
+        Returns:
+            (files_by_anchor, tags_by_aliyun_id) 两张查找表.
+        """
+        files_by_anchor: dict[str, DataCenterFileItem] = {}
+        tags_by_aliyun_id: dict[str, list[str]] = {}
+        for item in data_files:
+            if item.file_id:
+                tags_by_aliyun_id[item.file_id] = item.tags
+            anchor = extract_fileid(item.tags)
+            if not anchor:
+                continue
+            prev = files_by_anchor.get(anchor)
+            if prev is None:
+                files_by_anchor[anchor] = item
+                continue
+            # 重复锚点: 保留已在索引者, 其余按孤儿清理
+            if (
+                item.file_id in index_ids
+                and prev.file_id not in index_ids
+            ):
+                kept, dropped = item, prev
+            else:
+                kept, dropped = prev, item
+            logger.warning(
+                '发现重复 fileid 锚点 | {} | 保留={} | 待清理={}',
+                anchor, kept.file_id, dropped.file_id,
+            )
+            files_by_anchor[anchor] = kept
+        return files_by_anchor, tags_by_aliyun_id
+
+    def _filter_by_source_tag(
         self,
         docs: list[
             bailian_models.ListIndexDocumentsResponseBodyDataDocuments
         ],
+        tags_by_aliyun_id: Mapping[str, list[str]],
     ) -> list[
         bailian_models.ListIndexDocumentsResponseBodyDataDocuments
     ]:
-        """按来源标签前缀过滤孤儿删除候选集.
+        """按来源裸标签过滤孤儿删除候选集.
 
-        三所共用同一知识库, 仅标签含 {source}_ 前缀的文档允许
-        进入删除候选; 其他来源标签、无标签或标签查询失败的文档
-        一律跳过 (既不删除也不参与比对).
+        三所共用同一知识库, 仅标签含本交易所裸标签的文档允许进
+        入删除候选; 无标签、他来源标签或数据中心查无此文件的文档
+        一律跳过 (既不删除也不参与比对, 保守隔离).
 
-        索引文档列表接口不返回标签, 标签经数据中心文件详情
-        (DescribeFile, FileId 与索引文档 ID 同源) 逐篇查询.
+        标签取自数据中心快照, 不再逐篇 DescribeFile.
 
         Args:
             docs: 待判定的候选文档 (知识库存在但不在保留集).
+            tags_by_aliyun_id: {阿里云FileId -> 标签列表} 快照表.
 
         Returns:
-            标签以 {source}_ 开头的候选文档列表.
+            含本交易所裸标签的候选文档列表.
         """
-        prefix = f'{self._source}_'
         kept: list[
             bailian_models.ListIndexDocumentsResponseBodyDataDocuments
         ] = []
         skipped = 0
         for doc in docs:
-            tags = await self._doc_tags(doc.id or '')
+            doc_id = doc.id or ''
+            tags = tags_by_aliyun_id.get(doc_id)
             if tags is None:
-                logger.warning(
-                    '孤儿判定跳过: 标签查询失败 | {} | {}',
-                    doc.id, doc.name,
+                logger.debug(
+                    '孤儿判定跳过: 数据中心查无此文件 | {} | {}',
+                    doc_id, doc.name,
                 )
                 skipped += 1
                 continue
-            if any(tag.startswith(prefix) for tag in tags):
+            if has_source_tag(tags, self._source):
                 kept.append(doc)
             else:
                 logger.debug(
-                    '孤儿判定跳过: 非本来源标签 | {} | {} | {}',
-                    doc.id, doc.name, tags,
+                    '孤儿判定跳过: 无标签或非本来源 | {} | {} | {}',
+                    doc_id, doc.name, tags,
                 )
                 skipped += 1
         if skipped:
             logger.info('跳过非本来源文档 {} 篇', skipped)
         return kept
 
-    async def _doc_tags(self, aliyun_id: str) -> list[str] | None:
-        """查询数据中心文件标签.
+    def _residual_data_files(
+        self,
+        data_files: list[DataCenterFileItem],
+        index_ids: set[str],
+        matched_ids: set[str],
+    ) -> list[DataCenterFileItem]:
+        """筛选数据中心侧的本来源残留文件.
+
+        带本交易所裸标签、不在索引、且未匹配到有效清单的云端文
+        件判定为残留 (含重复 ``fileid_`` 标签取舍后的落选者); 解
+        析处理中状态一律跳过, 防误杀在途任务.
 
         Args:
-            aliyun_id: 阿里云 FileId (与索引文档 ID 同源).
+            data_files: 数据中心全量文件快照.
+            index_ids: 索引文档 ID 集合.
+            matched_ids: 已匹配有效清单的云端文件 ID 集合.
 
         Returns:
-            标签列表 (可为空列表); 文件不存在或查询失败时
-            返回 None.
+            待删除的残留文件列表.
         """
-        try:
-            resp = await self._client.describe_file(aliyun_id)
-        except Exception:
-            return None
-        data = resp.body.data
-        if data is None:
-            return None
-        return list(data.tags) if data.tags else []
+        residual: list[DataCenterFileItem] = []
+        skipped = 0
+        for item in data_files:
+            if not item.file_id or item.file_id in index_ids:
+                continue
+            if item.file_id in matched_ids:
+                continue
+            if not has_source_tag(item.tags, self._source):
+                continue
+            if item.status in _PARSE_PENDING_STATUSES:
+                logger.debug(
+                    '残留清理跳过: 处理中状态 | {} | 状态={}',
+                    item.file_id, item.status,
+                )
+                skipped += 1
+                continue
+            residual.append(item)
+        if skipped:
+            logger.info('残留清理跳过处理中文件 {} 个', skipped)
+        return residual
 
     def _log_dry_run(
         self,
         fresh: list[dict[str, Any]],
-        resume: list[tuple[dict[str, Any], str]],
+        resume: list[tuple[dict[str, Any], DataCenterFileItem]],
         to_delete: list[
             bailian_models.ListIndexDocumentsResponseBodyDataDocuments
         ],
+        residual: list[DataCenterFileItem],
     ) -> None:
         """预演模式输出待增删明细.
 
         Args:
             fresh: 待全新上传的文件清单条目.
-            resume: 断点续传对象, (清单条目, 阿里云FileId).
-            to_delete: 待删除的知识库文档对象.
+            resume: 续接对象, (清单条目, 云端文件快照).
+            to_delete: 待删除的索引孤儿文档对象.
+            residual: 待清理的数据中心残留文件.
         """
         for record in fresh:
             logger.info(
                 '[dry-run] 待补充 | {} | {}',
                 record['fileId'], build_file_name(record),
             )
-        for record, aliyun_id in resume:
+        for record, item in resume:
             logger.info(
-                '[dry-run] 断点续传 | {} | {}',
-                record['fileId'], aliyun_id,
+                '[dry-run] 续接 | {} | {} | 状态={}',
+                record['fileId'], item.file_id, item.status,
             )
         for doc in to_delete:
             logger.info(
                 '[dry-run] 待删除 | {} | {}', doc.id, doc.name,
             )
+        for item in residual:
+            logger.info(
+                '[dry-run] 待清理残留 | {} | {}',
+                item.file_id, item.file_name,
+            )
 
     # ==================================================
     # 单篇增删
     # ==================================================
-    async def _resume_mapped(
+    async def _resume_cloud(
         self,
-        resume: list[tuple[dict[str, Any], str]],
+        resume: list[tuple[dict[str, Any], DataCenterFileItem]],
         fresh: list[dict[str, Any]],
         report: AliyunAlignReport,
+        on_item_done: Callable[[], None] | None = None,
     ) -> list[tuple[str, str]]:
-        """断点续传: 复用已上传未入索引的文件, 不重新上传.
+        """续接: 复用已上传未入索引的云端文件, 不重新上传.
 
-        逐篇查询数据中心文件解析状态: 成功的直接进入批量入
-        索引队列; 仍在解析的等待完成; 解析失败或文件已被删除
-        的清理映射后降级为重新上传.
+        解析状态取自数据中心快照, 不再逐篇 DescribeFile: 解析成
+        功的直接进入批量入索引队列; 处理中状态的经
+        wait_file_parsed 实时续接等待; 显式失败终态删除云端文
+        件后降级为重新上传; 未知状态保守保留文件并记入失败清单,
+        待下轮快照重试, 严禁误删健康文件.
 
         Args:
-            resume: (清单条目, 阿里云FileId) 断点续传对象列表.
+            resume: (清单条目, 云端文件快照) 续接对象列表.
             fresh: 重新上传队列, 降级条目原地追加.
             report: 执行结果报告, 续传失败原地追加.
+            on_item_done: 可选单篇完成钩子, 每个条目任一出循环口调用一次.
 
         Returns:
-            (上交所fileId, 阿里云FileId) 解析成功待入索引列表.
+            (本地fileId, 阿里云FileId) 解析成功待入索引列表.
         """
         parsed: list[tuple[str, str]] = []
         requeue_start = len(fresh)
         total = len(resume)
-        for idx, (record, aliyun_id) in enumerate(resume, 1):
+
+        def tick() -> None:
+            """单篇完成计数钩子 (允许为空)."""
+            if on_item_done is not None:
+                on_item_done()
+
+        for idx, (record, item) in enumerate(resume, 1):
             file_id = record['fileId']
-            status = await self._describe_file_status(aliyun_id)
-            if status is None:
-                # 文件已不存在: 清除映射转重新上传
-                self._mapping.remove(file_id)
-                fresh.append(record)
-                continue
-            if status != 'PARSE_SUCCESS':
+            aliyun_id = item.file_id
+            status = item.status
+            if status == 'PARSE_SUCCESS':
                 logger.info(
-                    '断点续传 [{}/{}] 等待解析 | {} | {}',
+                    '续接 [{}/{}] 解析完成, 等待批量入索引 | {} | {}',
                     idx, total, file_id, aliyun_id,
+                )
+                parsed.append((file_id, aliyun_id))
+                tick()
+                continue
+            if status in _PARSE_PENDING_STATUSES:
+                logger.info(
+                    '续接 [{}/{}] 等待解析 | {} | {} | 状态={}',
+                    idx, total, file_id, aliyun_id, status,
                 )
                 try:
                     await self._client.wait_file_parsed(aliyun_id)
                 except Exception as exc:
                     final = await self._describe_file_status(aliyun_id)
-                    if final == 'PARSE_FAILED':
+                    if final in FILE_FAILED_STATUSES:
                         logger.warning(
-                            '断点续传解析失败, 删除后重传 | {} | {}',
-                            file_id, exc,
+                            '续接解析失败, 删除后重传 | {} | {} | 状态={}',
+                            file_id, exc, final,
                         )
                         await self._delete_file_quiet(aliyun_id)
-                        self._mapping.remove(file_id)
                         fresh.append(record)
-                    else:  # 等待超时等: 保留映射, 下次续传重试
+                    else:  # 等待超时等: 文件仍在, 下次续接重试
                         logger.error(
-                            '断点续传失败 [{}/{}] | {} | {}',
+                            '续接失败 [{}/{}] | {} | {}',
                             idx, total, file_id, exc,
                         )
                         report.failed_adds.append((file_id, str(exc)))
+                    tick()
                     continue
-            logger.info(
-                '断点续传 [{}/{}] 解析完成, 等待批量入索引 | {} | {}',
-                idx, total, file_id, aliyun_id,
-            )
-            parsed.append((file_id, aliyun_id))
+                logger.info(
+                    '续接 [{}/{}] 解析完成, 等待批量入索引 | {} | {}',
+                    idx, total, file_id, aliyun_id,
+                )
+                parsed.append((file_id, aliyun_id))
+                tick()
+                continue
+            if status in FILE_FAILED_STATUSES:
+                # 显式失败终态 (快照判定): 删除云端文件后降级重传
+                logger.warning(
+                    '续接发现失败态, 删除后重传 | {} | {} | 状态={}',
+                    file_id, aliyun_id, status,
+                )
+                await self._delete_file_quiet(aliyun_id)
+                fresh.append(record)
+            else:  # 未知状态: 保守保留文件, 记入失败清单待下轮重试
+                logger.error(
+                    '续接发现未知状态, 保留文件待下轮重试 '
+                    '| {} | {} | 状态={}',
+                    file_id, aliyun_id, status,
+                )
+                report.failed_adds.append(
+                    (file_id, f'未知状态 {status}'),
+                )
+            tick()
         if total:
             logger.info(
-                '断点续传阶段完成 | 续传成功 {} / {} 篇 | 转重传 {} 篇',
+                '续接阶段完成 | 续接成功 {} / {} 篇 | 转重传 {} 篇',
                 len(parsed), total, len(fresh) - requeue_start,
             )
         return parsed
@@ -594,6 +659,7 @@ class AliyunKBAligner:
         self,
         fresh: list[dict[str, Any]],
         report: AliyunAlignReport,
+        on_item_done: Callable[[], None] | None = None,
     ) -> list[tuple[str, str]]:
         """并行上传新文件并等待解析, 返回解析成功清单.
 
@@ -603,9 +669,10 @@ class AliyunKBAligner:
         Args:
             fresh: 待全新上传的有效文件清单条目.
             report: 执行结果报告, 原地更新.
+            on_item_done: 可选单篇完成钩子, 成功/失败/返回空均计一次.
 
         Returns:
-            (上交所fileId, 阿里云FileId) 解析成功列表.
+            (本地fileId, 阿里云FileId) 解析成功列表.
         """
         if not fresh:
             return []
@@ -617,9 +684,12 @@ class AliyunKBAligner:
         ) -> tuple[str, str] | None:
             """限流并发下单篇文档的上传与解析."""
             async with semaphore:
-                return await self._upload_and_parse(
+                result = await self._upload_and_parse(
                     record, idx, total, report,
                 )
+            if on_item_done is not None:
+                on_item_done()
+            return result
 
         results = await asyncio.gather(
             *(worker(i, r) for i, r in enumerate(fresh, 1))
@@ -640,7 +710,9 @@ class AliyunKBAligner:
     ) -> tuple[str, str] | None:
         """上传并解析单篇文档 (不执行入索引).
 
-        上传成功即写入映射, 任一步失败记入报告, 不中断其他文档.
+        上传时写入云端哈希锚点标签, 任一步失败记入报告, 不中断其他文
+        文档. 中断幂等性由下轮快照的标签匹配保证, 本地不落盘任
+        何映射.
 
         Args:
             record: 有效文件清单条目.
@@ -649,7 +721,7 @@ class AliyunKBAligner:
             report: 执行结果报告, 原地更新.
 
         Returns:
-            (上交所fileId, 阿里云FileId); 失败时返回 None.
+            (本地fileId, 阿里云FileId); 失败时返回 None.
         """
         file_id = record['fileId']
         logger.info(
@@ -657,14 +729,17 @@ class AliyunKBAligner:
         )
         try:
             content = await self._download_pdf(record['filePath'])
+            tags = build_file_tags(record, self._source)
+            logger.debug(
+                '上传打标 | {} | 锚点={}',
+                file_id, extract_fileid(tags),
+            )
             aliyun_id = await self._client.upload_file(
                 file_name=build_file_name(record),
                 content=content,
-                tags=[build_project_tag(record, self._source)],
+                tags=tags,
                 original_file_url=record['filePath'],
             )
-            # 映射即传即写: 后续解析/入索引阶段中断也不致重传
-            self._mapping.set(file_id, aliyun_id)
             await self._client.wait_file_parsed(aliyun_id)
             logger.info(
                 '补充文档 [{}/{}] 解析完成, 等待批量入索引 | {}',
@@ -686,11 +761,11 @@ class AliyunKBAligner:
     ) -> None:
         """分批提交已解析文档入索引并记录结果.
 
-        映射已在上传成功时写入; 入索引失败篇记入报告, 因映射
-        仍在, 下次对齐走断点续传重试入索引而不会重传.
+        入索引失败篇记入报告; 因云端文件与标签仍在, 下次对齐经
+        快照标签匹配走续接重试入索引而不会重传.
 
         Args:
-            parsed: (上交所fileId, 阿里云FileId) 列表.
+            parsed: (本地fileId, 阿里云FileId) 列表.
             report: 执行结果报告, 原地更新.
         """
         if not parsed:
@@ -737,7 +812,7 @@ class AliyunKBAligner:
         index: int,
         total: int,
     ) -> None:
-        """删除一篇无关文档: 移出索引并删除数据中心文件.
+        """删除一篇索引孤儿文档: 移出索引并删除数据中心文件.
 
         Args:
             doc: 待删除的知识库文档对象.
@@ -756,20 +831,48 @@ class AliyunKBAligner:
             await self._client.delete_files(
                 bailian_models.DeleteFilesRequest(file_ids=[aliyun_id])
             )
-            sse_id = self._mapping.find_file_id_by_aliyun_id(aliyun_id)
-            if sse_id:
-                self._mapping.remove(sse_id)
             report.deleted.append(aliyun_id)
             logger.info(
-                '删除文档成功 [{}/{}] | {} | {}',
+                '删除孤儿文档成功 [{}/{}] | {} | {}',
                 index, total, aliyun_id, doc.name,
             )
         except Exception as exc:  # 单篇失败不中断整体对齐
             logger.error(
-                '删除文档失败 [{}/{}] | {} | {}',
+                '删除孤儿文档失败 [{}/{}] | {} | {}',
                 index, total, aliyun_id, exc,
             )
             report.failed_deletes.append((aliyun_id, str(exc)))
+
+    async def _remove_residual_file(
+        self,
+        item: DataCenterFileItem,
+        report: AliyunAlignReport,
+        index: int,
+        total: int,
+    ) -> None:
+        """删除一个数据中心残留文件 (不在索引内, 仅删文件).
+
+        Args:
+            item: 待删除的残留文件快照.
+            report: 执行结果报告, 原地更新.
+            index: 当前进度序号 (从 1 开始).
+            total: 待清理残留总数.
+        """
+        try:
+            await self._client.delete_files(
+                bailian_models.DeleteFilesRequest(file_ids=[item.file_id])
+            )
+            report.deleted.append(item.file_id)
+            logger.info(
+                '删除残留文件成功 [{}/{}] | {} | {}',
+                index, total, item.file_id, item.file_name,
+            )
+        except Exception as exc:  # 单个失败不中断整体对齐
+            logger.error(
+                '删除残留文件失败 [{}/{}] | {} | {}',
+                index, total, item.file_id, exc,
+            )
+            report.failed_deletes.append((item.file_id, str(exc)))
 
     async def _download_pdf(self, url: str) -> bytes:
         """下载披露文件 PDF 字节内容.
@@ -846,8 +949,12 @@ class AliyunKBAligner:
     # 清库
     # ==================================================
     async def purge(self, *, dry_run: bool = False) -> AliyunPurgeReport:
-        """清空知识库: 删除索引全部文档及对应数据中心文件.
+        """清空知识库: 删除索引全部文档及本应用管理的数据中心文件.
 
+        数据中心删除集合仅含有本应用标签 (fileid_ 锚点或交易所裸来
+        源标签) 的文件; 无本应用标签的外部文件 (如控制台手工上传)
+        一律排除保留, 只统计数量并告警, 避免误删非本应用管理的文件.
+        新体系下本应用文件均带标签, 「清库重建」场景不受影响.
         阿里云切片随索引文档删除而删除, 且不支持无文件过滤的
         全量切片列举, 因此不单独处理孤儿切片.
 
@@ -858,36 +965,56 @@ class AliyunKBAligner:
             清库执行结果报告.
         """
         report = AliyunPurgeReport(dry_run=dry_run)
-        index_docs = await self.list_all_index_documents()
-        report.total_docs = len(index_docs)
-        report.total_mapped_files = len(self._mapping)
-        logger.info(
-            '清库盘点 | 索引文档 {} 篇 | 本地映射 {} 条',
-            report.total_docs, report.total_mapped_files,
+        index_docs, data_files = await asyncio.gather(
+            self.list_all_index_documents(),
+            self._client.list_all_data_center_files(),
         )
+        report.total_docs = len(index_docs)
+        report.total_data_files = len(data_files)
+        logger.info(
+            '清库盘点 | 索引文档 {} 篇 | 数据中心文件 {} 个',
+            report.total_docs, report.total_data_files,
+        )
+
+        # 数据中心文件按标签区分: 有本应用标签者纳入删除集合, 无标
+        # 签的外部文件排除保留, 收敛破坏半径.
+        managed_ids = {
+            item.file_id
+            for item in data_files
+            if item.file_id and has_app_tags(item.tags)
+        }
+        external = [
+            item for item in data_files if not has_app_tags(item.tags)
+        ]
+        report.excluded_external_files = len(external)
+        if external:
+            logger.warning(
+                '清除范围内包含外部文件（无本应用标签）{} 个, '
+                '已排除保留不删除 | {}',
+                len(external),
+                ', '.join(
+                    f'{item.file_id}({item.file_name})'
+                    for item in external[:10]
+                ),
+            )
         if dry_run:
             return report
 
         index_ids = [doc.id for doc in index_docs if doc.id]
         report.deleted_docs = await self._purge_index(index_ids, report)
 
-        # 数据中心文件 = 索引内文件 + 映射中记录的文件
-        file_ids = set(index_ids) | {
-            aliyun_id for _, aliyun_id in self._mapping.items()
-        }
+        # 数据中心删除集合 = 索引内文件 并 有本应用标签的文件 (外部文件已排除)
+        file_ids = set(index_ids) | managed_ids
         deleted_file_ids = await self._purge_data_files(
             sorted(file_ids), report,
         )
         report.deleted_files = len(deleted_file_ids)
 
-        for file_id, aliyun_id in self._mapping.items():
-            if aliyun_id in deleted_file_ids:
-                self._mapping.remove(file_id)
-
         logger.info(
             '清库完成 | 索引删除 {} 篇 | 数据中心删除 {} 个 | '
-            '失败 {} 项',
-            report.deleted_docs, report.deleted_files, len(report.failed),
+            '排除外部文件 {} 个 | 失败 {} 项',
+            report.deleted_docs, report.deleted_files,
+            report.excluded_external_files, len(report.failed),
         )
         return report
 
