@@ -45,6 +45,25 @@ _VOLC_REQUIRED_FIELDS: tuple[tuple[str, str], ...] = (
 # timeout 数值框的缺省回退值, 与两个平台配置的默认值一致.
 _DEFAULT_TIMEOUT = 30
 
+# 切片长度上限的缺省回退值与合法范围 (官方范围 1-6000,
+# 低于 100 需连带 OverlapSize, 故控件下限取 100).
+_DEFAULT_CHUNK_SIZE = 1536
+_CHUNK_SIZE_MIN = 100
+_CHUNK_SIZE_MAX = 6000
+
+# 切片模式下拉选项: (参数值, 展示名). 空串走平台智能切分;
+# regex 模式依赖未暴露的 Separator 参数, 故不提供.
+_CHUNK_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ('', '智能切分（默认）'),
+    ('length', '按长度切分'),
+    ('page', '按页切分'),
+    ('h1', '按一级标题切分'),
+    ('h2', '按二级标题切分'),
+    ('h3', '按三级标题切分'),
+    ('h4', '按四级标题切分'),
+    ('h5', '按五级标题切分'),
+)
+
 # 阿里云百炼知识库控制台地址.
 _ALIYUN_CONSOLE_URL = (
     'https://bailian.console.aliyun.com/cn-beijing'
@@ -97,6 +116,24 @@ def _normalized_timeout(value: object) -> int:
     return _DEFAULT_TIMEOUT
 
 
+def _normalized_chunk_size(value: object) -> int:
+    """规整切片长度上限输入, 空值回退默认并钳制范围.
+
+    ``ui.number`` 清空后 value 为 None, 原样落盘会使配置段中该键为
+    None, 构造 settings 时报 ValidationError, 故非数值一律回退默认值;
+    数值再钳制到 [_CHUNK_SIZE_MIN, _CHUNK_SIZE_MAX] 合法区间.
+
+    Args:
+        value: 切片长度上限数值框的当前值.
+
+    Returns:
+        规整后的切片字符数上限.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return _DEFAULT_CHUNK_SIZE
+    return max(_CHUNK_SIZE_MIN, min(_CHUNK_SIZE_MAX, int(value)))
+
+
 class ConfigPanel:
     """知识库平台配置编辑面板 (阿里云 + 火山引擎).
 
@@ -138,7 +175,7 @@ class ConfigPanel:
         """
         self._store = config_store
         self._is_running = is_running
-        self._fields: dict[str, ui.input | ui.number] = {}
+        self._fields: dict[str, ui.input | ui.number | ui.select] = {}
         self._volc_fields: dict[str, ui.input | ui.number] = {}
         self._save_btns: list[ui.button] = []
         self._test_btn: ui.button | None = None
@@ -300,6 +337,34 @@ class ConfigPanel:
                 ui.input(label='Parser')
                 .classes('w-full')
                 .tooltip('文档解析器, 如 DASHSCOPE_DOCMIND')
+            )
+            self._fields['chunk_mode'] = (
+                ui.select(
+                    dict(_CHUNK_MODE_OPTIONS),
+                    label='切片模式',
+                    value='',
+                )
+                .classes('w-full')
+                .tooltip(
+                    '文档入索引的切片方式,'
+                    ' 默认智能切分; regex 模式'
+                    ' 需额外配置 Separator, 故不提供'
+                )
+            )
+            self._fields['chunk_size'] = (
+                ui.number(
+                    label='切片长度上限（字符）',
+                    value=1536,
+                    min=_CHUNK_SIZE_MIN,
+                    max=_CHUNK_SIZE_MAX,
+                )
+                .classes('w-full')
+                .tooltip(
+                    '每个文本切片的字符数上限（非 token），'
+                    '100-6000；智能切分时超长文本可能被截断，'
+                    '自定义切分时强制切割。阿里云官方默认 500，'
+                    '本应用默认 1536'
+                )
             )
             self._save_button(
                 'aliyun_knowledge', '阿里云', '同步配置'
@@ -467,7 +532,7 @@ class ConfigPanel:
 
     def _bind_field_change(
         self,
-        fields: dict[str, ui.input | ui.number],
+        fields: dict[str, ui.input | ui.number | ui.select],
     ) -> None:
         """为字符串输入框绑定失焦/粘贴后的空白清理回调.
 
@@ -499,12 +564,12 @@ class ConfigPanel:
 
     def _collect_section_values(
         self,
-        fields: dict[str, ui.input | ui.number],
+        fields: dict[str, ui.input | ui.number | ui.select],
     ) -> dict[str, object]:
         """收集单个平台段表单当前值组成配置字典.
 
-        字符串字段值统一去除首尾空白, timeout 非数值
-        回退缺省值, 其余字段保持 number 组件原生类型.
+        字符串字段值统一去除首尾空白, timeout / 切片长度上限非数值
+        回退缺省值, 其余字段保持组件原生类型.
 
         Args:
             fields: 平台表单输入组件字典, key 为配置字段名.
@@ -517,6 +582,8 @@ class ConfigPanel:
             value = _stripped_value(field.value)
             if key == 'timeout':
                 value = _normalized_timeout(value)
+            if key == 'chunk_size':
+                value = _normalized_chunk_size(value)
             values[key] = value
         return values
 
@@ -641,10 +708,7 @@ class ConfigPanel:
                 type='warning',
             )
             return
-        values = {
-            key: _stripped_value(field.value)
-            for key, field in self._fields.items()
-        }
+        values = self._collect_aliyun_values()
         self._testing = True
         if self._test_btn is not None:
             self._test_btn.props('loading')

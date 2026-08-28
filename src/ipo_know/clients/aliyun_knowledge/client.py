@@ -521,7 +521,9 @@ class AliyunKnowledgeClient:
     ) -> list[str]:
         """提交文件入索引任务并轮询至完成.
 
-        不传切片参数, 使用平台智能切片. 整批任务失败时抛出
+        切片参数取配置项 ``chunk_mode`` / ``chunk_size``: ``chunk_mode``
+        为空串时转 None 不下发, 由平台智能切分; ``chunk_size``
+        始终下发 (控制切片字符数上限). 整批任务失败时抛出
         异常; 任务完成但个别文档失败时通过返回值告知.
 
         Args:
@@ -533,11 +535,21 @@ class AliyunKnowledgeClient:
         Raises:
             RuntimeError: 任务提交失败、执行失败或等待超时.
         """
+        chunk_mode = self._config.chunk_mode or None
+        chunk_size = self._config.chunk_size
+        logger.info(
+            '提交入索引任务 | file_count={} | chunk_mode={} '
+            '| chunk_size={}',
+            len(document_ids), chunk_mode or '智能切分',
+            chunk_size,
+        )
         submit_resp = await self.submit_index_add_documents_job(
             bailian_models.SubmitIndexAddDocumentsJobRequest(
                 index_id=self.index_id,
                 document_ids=document_ids,
                 source_type='DATA_CENTER_FILE',
+                chunk_mode=chunk_mode,
+                chunk_size=chunk_size,
             )
         )
         if not submit_resp.body.data or not submit_resp.body.data.id:
