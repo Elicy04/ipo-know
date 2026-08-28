@@ -53,6 +53,7 @@ class QueryBackend(Protocol):
         messages: Sequence[Mapping[str, str]],
         *,
         stop_event: threading.Event | None = None,
+        session_files: Sequence[str] | None = None,
     ) -> AsyncIterator[ChatStreamEvent]:
         """发起流式知识问答, 返回异步事件迭代器.
 
@@ -60,6 +61,9 @@ class QueryBackend(Protocol):
             messages: 会话历史与本次提问组成的 role/content
                 消息序列, 平台不保存会话状态需全量回传.
             stop_event: 停止标志, 置位后尽快结束产出.
+            session_files: 会话临时文件 ID 列表, 仅阿里云
+                生效, 火山引擎忽略. 文件须经 AddFile
+                接口注册并解析完成.
 
         Returns:
             逐条产出规整事件的异步迭代器.

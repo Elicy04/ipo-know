@@ -460,6 +460,64 @@ class AliyunKnowledgeClient:
         file_id = add_resp.body.data.file_id
         return file_id
 
+    async def upload_session_file(
+        self, file_name: str, content: bytes
+    ) -> str:
+        """上传会话临时文件到百炼数据中心.
+
+        与知识库文件不同, 会话文件须以
+        ``category_type='SESSION_FILE'`` 注册且分类固定为
+        ``default``, 返回的 FileId 以 ``file_session`` 开头,
+        仅知识问答 ``session_files`` 可引用, 有效期 7 天.
+
+        Args:
+            file_name: 文件名.
+            content: 文件字节内容.
+
+        Returns:
+            会话文件 ID (file_session 前缀).
+        """
+        logger.info(
+            '开始上传会话文件 | file={} | size={}',
+            file_name, len(content),
+        )
+        md5 = hashlib.md5(content).hexdigest()
+        lease_resp = await self._api_call(
+            self._get_client().apply_file_upload_lease,
+            'default',
+            self.workspace_id,
+            bailian_models.ApplyFileUploadLeaseRequest(
+                category_type='SESSION_FILE',
+                file_name=file_name,
+                md_5=md5,
+                size_in_bytes=str(len(content)),
+            ),
+        )
+        lease_data = lease_resp.body.data
+        if not lease_data or not lease_data.file_upload_lease_id:
+            raise RuntimeError(
+                f'申请上传租约失败: {lease_resp.body.message}'
+            )
+
+        await self._put_presigned(lease_data.param, content)
+
+        add_resp = await self.add_file(
+            bailian_models.AddFileRequest(
+                category_id='default',
+                category_type='SESSION_FILE',
+                lease_id=lease_data.file_upload_lease_id,
+                parser=self._config.parser,
+            )
+        )
+        if not add_resp.body.data or not add_resp.body.data.file_id:
+            raise RuntimeError(f'添加文件失败: {add_resp.body.message}')
+        file_id = add_resp.body.data.file_id
+        logger.info(
+            '会话文件上传完成 | file={} | file_id={}',
+            file_name, file_id,
+        )
+        return file_id
+
     async def _put_presigned(
         self,
         param: bailian_models.ApplyFileUploadLeaseResponseBodyDataParam,
@@ -489,30 +547,59 @@ class AliyunKnowledgeClient:
                 f'{response.text[:200]}'
             )
 
-    async def wait_file_parsed(self, file_id: str) -> None:
-        """轮询等待文件解析完成.
+    async def wait_file_parsed(
+        self,
+        file_id: str,
+        target_status: str = 'PARSE_SUCCESS',
+        timeout_seconds: int = PARSE_POLL_TIMEOUT_SECONDS,
+    ) -> None:
+        """轮询等待文件到达指定处理终态.
 
         Args:
             file_id: 数据中心文件 ID.
+            target_status: 等待的成功终态. 知识库文件为
+                PARSE_SUCCESS; SESSION_FILE 状态机更长, 终态
+                为 FILE_IS_READY.
+            timeout_seconds: 等待超时秒数.
 
         Raises:
-            RuntimeError: 解析失败或等待超时.
+            RuntimeError: 命中失败终态或等待超时.
         """
         elapsed = 0
-        while elapsed < PARSE_POLL_TIMEOUT_SECONDS:
+        while elapsed < timeout_seconds:
             resp = await self.describe_file(file_id)
             data = resp.body.data
             status = data.status if data else None
-            if status == 'PARSE_SUCCESS':
+            logger.debug(
+                '轮询文件处理状态 | file_id={} | status={}',
+                file_id, status,
+            )
+            if status == target_status:
                 return
-            if status == 'PARSE_FAILED':
+            if status in FILE_FAILED_STATUSES:
                 reason = data.parse_error_message if data else '未知'
-                raise RuntimeError(f'文件解析失败: {reason}')
+                raise RuntimeError(
+                    f'文件处理失败: {status} | 原因: {reason}'
+                )
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
             elapsed += POLL_INTERVAL_SECONDS
         raise RuntimeError(
-            f'等待文件解析超时 ({PARSE_POLL_TIMEOUT_SECONDS}s) | '
+            f'等待文件处理超时 ({timeout_seconds}s) | '
             f'FileId={file_id}'
+        )
+
+    async def wait_session_file_ready(
+        self, file_id: str
+    ) -> None:
+        """等待会话文件就绪 (FILE_IS_READY).
+
+        SESSION_FILE 状态机比知识库文件长:
+        解析 → 安全检测 → 索引构建, 终态为
+        FILE_IS_READY 才能用于问答.
+        """
+        await self.wait_file_parsed(
+            file_id, target_status='FILE_IS_READY',
+            timeout_seconds=180,
         )
 
     async def add_documents_to_index(
@@ -521,7 +608,9 @@ class AliyunKnowledgeClient:
     ) -> list[str]:
         """提交文件入索引任务并轮询至完成.
 
-        不传切片参数, 使用平台智能切片. 整批任务失败时抛出
+        切片参数取配置项 ``chunk_mode`` / ``chunk_size``: ``chunk_mode``
+        为空串时转 None 不下发, 由平台智能切分; ``chunk_size``
+        始终下发 (控制切片字符数上限). 整批任务失败时抛出
         异常; 任务完成但个别文档失败时通过返回值告知.
 
         Args:
