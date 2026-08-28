@@ -117,12 +117,16 @@ class VolcQueryBackend:
         messages: Sequence[Mapping[str, str]],
         *,
         stop_event: threading.Event | None = None,
+        session_files: Sequence[str] | None = None,  # noqa: ARG002
     ) -> AsyncIterator[ChatStreamEvent]:
         """调用 stream_service_chat 并规整 SSE 帧为事件流.
 
         Args:
             messages: role/content 消息序列, 全量回传.
             stop_event: 停止标志, 置位后立即停止产出.
+            session_files: 会话临时文件 ID 列表, 仅阿里云
+                生效, 火山引擎忽略. 文件须经 AddFile
+                接口注册并解析完成.
 
         Yields:
             references (首流命中切片) / reasoning_delta (推理

@@ -373,7 +373,10 @@ class AliyunChatClient:
         return f'https://{host}/api/v2/apps/knowledge/chat'
 
     async def stream_chat(
-        self, messages: Sequence[Mapping[str, str]]
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        session_files: Sequence[str] | None = None,
     ) -> AsyncIterator[ChatSseEvent]:
         """发起流式问答并产出规整中间事件.
 
@@ -385,6 +388,9 @@ class AliyunChatClient:
         Args:
             messages: role/content 消息序列, role 仅
                 user/assistant.
+            session_files: 会话临时文件 ID 列表, 经 AddFile
+                接口注册并解析完成的文件随本轮提问透传,
+                为空时不携带.
 
         Yields:
             planning_delta / references / answer_delta /
@@ -406,7 +412,9 @@ class AliyunChatClient:
                 ],
             },
             'parameters': {
-                'agent_options': {'agent_id': self._agent_id},
+                'agent_options': self._build_agent_options(
+                    session_files=session_files,
+                ),
             },
             'stream': True,
         }
@@ -438,6 +446,25 @@ class AliyunChatClient:
                 raise await self._http_error(response)
             async for event in self._iter_events(response):
                 yield event
+
+    def _build_agent_options(
+        self,
+        *,
+        session_files: Sequence[str] | None = None,
+    ) -> dict:
+        """构造 agent_options 请求参数.
+
+        Args:
+            session_files: 会话临时文件 ID 列表, 为空时
+                不携带.
+
+        Returns:
+            agent_options 请求字典.
+        """
+        opts: dict = {'agent_id': self._agent_id}
+        if session_files:
+            opts['session_files'] = list(session_files)
+        return opts
 
     @staticmethod
     async def _iter_events(

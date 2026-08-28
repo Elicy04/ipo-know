@@ -8,9 +8,8 @@
 from ipo_know.kb_align.aliyun_aligner import AliyunAlignReport
 from ipo_know.kb_align.aliyun_aligner import AliyunKBAligner
 from ipo_know.kb_align.aliyun_aligner import AliyunPurgeReport
-from ipo_know.kb_align.aliyun_aligner import FileMappingStore
 from ipo_know.kb_align.aliyun_aligner import build_file_name
-from ipo_know.kb_align.aliyun_aligner import build_project_tag
+from ipo_know.kb_align.aliyun_tags import build_file_tags
 from ipo_know.kb_align.volc_aligner import DOC_ID_PREFIX
 from ipo_know.kb_align.volc_aligner import STRATEGY_RESOURCE_ID
 from ipo_know.kb_align.volc_aligner import AlignReport
@@ -26,10 +25,9 @@ __all__ = [
     'AliyunAlignReport',
     'AliyunKBAligner',
     'AliyunPurgeReport',
-    'FileMappingStore',
     'PurgeReport',
     'VolcKBAligner',
     'build_file_name',
-    'build_project_tag',
+    'build_file_tags',
     'file_id_to_doc_id',
 ]

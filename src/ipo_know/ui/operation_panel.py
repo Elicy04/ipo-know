@@ -6,6 +6,7 @@
 """
 
 import asyncio
+from collections.abc import Awaitable
 from typing import Any
 from typing import cast
 
@@ -52,6 +53,15 @@ class OperationPanel:
         _running: 后台任务是否正在运行.
         _platform: 外部注入的目标平台标识 (aliyun/volc).
         _cached_files: 分步模式下爬取阶段缓存的文件清单.
+        _crawl_progress: 爬取进度比例 (0~1).
+        _crawl_done: 爬取已完成所数.
+        _crawl_total: 爬取总所数.
+        _crawl_indeterminate: 爬取条是否呈不确定态 (单所无中间进度).
+        _upload_progress: 上传进度比例 (0~1).
+        _upload_done: 上传已完成篇数.
+        _upload_total: 上传待补充总篇数 (随降级重传动态增长).
+        _show_crawl_bar: 爬取进度条是否展示 (仅本次任务相关时).
+        _show_upload_bar: 上传进度条是否展示 (仅本次任务相关时).
         _container: 面板根容器, 供后台任务恢复 UI 上下文.
     """
 
@@ -72,6 +82,17 @@ class OperationPanel:
         self._platform: str = 'aliyun'
         self._cached_files: dict[str, list[dict[str, Any]]] = {}
 
+        # 进度状态: 后台协程只写字段, 组件渲染由定时器承担.
+        self._crawl_progress: float = 0.0
+        self._crawl_done: int = 0
+        self._crawl_total: int = 0
+        self._crawl_indeterminate: bool = False
+        self._upload_progress: float = 0.0
+        self._upload_done: int = 0
+        self._upload_total: int = 0
+        self._show_crawl_bar: bool = False
+        self._show_upload_bar: bool = False
+
         # UI 引用 (在 _build_ui 中赋值)
         self._source_select: ui.select | None = None
         self._industry_input: ui.input | None = None
@@ -82,6 +103,13 @@ class OperationPanel:
         self._btn_crawl: ui.button | None = None
         self._btn_upload: ui.button | None = None
         self._spinner: ui.spinner | None = None
+        self._progress_col: ui.column | None = None
+        self._crawl_row: ui.row | None = None
+        self._crawl_bar: ui.linear_progress | None = None
+        self._crawl_count: ui.label | None = None
+        self._upload_row: ui.row | None = None
+        self._upload_bar: ui.linear_progress | None = None
+        self._upload_count: ui.label | None = None
         self._container: ui.card | None = None
 
         self._build_ui()
@@ -168,6 +196,41 @@ class OperationPanel:
                 ).classes('flex-1').disable()
 
             self._step_row.visible = False
+
+            # 进度区: 爬取/上传两行, 默认隐藏, 显隐与值由定时器渲染.
+            with ui.column().classes(
+                'w-full gap-1 mt-2'
+            ) as progress_col:
+                self._progress_col = progress_col
+                with ui.row().classes(
+                    'w-full items-center gap-2'
+                ) as crawl_row:
+                    self._crawl_row = crawl_row
+                    ui.label('爬取').classes(
+                        'w-8 shrink-0 text-xs text-gray-400'
+                    )
+                    self._crawl_bar = ui.linear_progress(
+                        value=0.0, show_value=False,
+                    ).classes('flex-1')
+                    self._crawl_count = ui.label('0/0').classes(
+                        'w-14 shrink-0 text-right text-xs '
+                        'text-gray-400'
+                    )
+                with ui.row().classes(
+                    'w-full items-center gap-2'
+                ) as upload_row:
+                    self._upload_row = upload_row
+                    ui.label('上传').classes(
+                        'w-8 shrink-0 text-xs text-gray-400'
+                    )
+                    self._upload_bar = ui.linear_progress(
+                        value=0.0, show_value=False,
+                    ).classes('flex-1')
+                    self._upload_count = ui.label('0/0').classes(
+                        'w-14 shrink-0 text-right text-xs '
+                        'text-gray-400'
+                    )
+            progress_col.visible = False
 
             # 运行中 spinner (默认隐藏)
             self._spinner = ui.spinner(
@@ -294,6 +357,7 @@ class OperationPanel:
             platform: 目标平台标识 (aliyun/volc) 快照值.
         """
         self._running = True
+        self._reset_progress_ui()
         # 确保日志捕获已启动 (幂等): 异常日志必须在
         # 任何可能失败的步骤之前已可被日志面板接收.
         self._log_panel.start_capture()
@@ -320,6 +384,7 @@ class OperationPanel:
             )
         finally:
             self._running = False
+            self._reset_progress_ui()
             # 注意: 不调用 stop_capture(). 日志捕获由页面
             # 启动时全局注册, 此处停止会导致日志面板
             # 在首次运行后永久静默, 错误信息不可见.
@@ -337,6 +402,7 @@ class OperationPanel:
             industry: 行业参数.
         """
         self._running = True
+        self._reset_progress_ui()
         self._log_panel.start_capture()
         try:
             if source == 'all':
@@ -362,6 +428,7 @@ class OperationPanel:
             )
         finally:
             self._running = False
+            self._reset_progress_ui()
 
     # --------------------------------------------------
     # 后台任务: 分步上传
@@ -373,6 +440,7 @@ class OperationPanel:
             platform: 目标平台标识 (aliyun/volc) 快照值.
         """
         self._running = True
+        self._reset_progress_ui()
         self._log_panel.start_capture()
         try:
             await self._upload_all(self._cached_files, platform)
@@ -390,6 +458,7 @@ class OperationPanel:
             )
         finally:
             self._running = False
+            self._reset_progress_ui()
 
     # --------------------------------------------------
     # 配置校验
@@ -416,21 +485,39 @@ class OperationPanel:
         Returns:
             以数据源标识为 key、文件清单为 value 的字典.
         """
+        # 爬取进度按所粒度: 三所并行, 每所完成计一次.
+        self._show_crawl_bar = True
+        self._crawl_indeterminate = False
+        self._crawl_done = 0
+        self._crawl_total = 3
+        self._crawl_progress = 0.0
+
+        async def _wrap(
+            coro: Awaitable[list[dict[str, Any]]],
+        ) -> list[dict[str, Any]]:
+            """所级完成计数: 保留返回值与异常传播语义."""
+            result = await coro
+            self._crawl_done += 1
+            self._crawl_progress = min(
+                self._crawl_done / self._crawl_total, 1.0
+            )
+            return result
+
         sse_files, bse_files, szse_files = (
             await asyncio.gather(
-                run.io_bound(
+                _wrap(run.io_bound(
                     SSEIPOCrawler().collect,
                     csrc_code='C36',
                     issue_market_type='1,2',
-                ),
-                run.io_bound(
+                )),
+                _wrap(run.io_bound(
                     BSEIPOCrawler().collect,
                     csrc_industry=industry,
-                ),
-                run.io_bound(
+                )),
+                _wrap(run.io_bound(
                     SZSEIPOCrawler().collect,
                     industry=industry,
-                ),
+                )),
             )
         )
         return {
@@ -451,21 +538,34 @@ class OperationPanel:
         Returns:
             文件清单列表.
         """
-        if source == 'sse':
-            return await run.io_bound(
-                SSEIPOCrawler().collect,
-                csrc_code=industry,
-                issue_market_type='1,2',
-            )
-        if source == 'bse':
-            return await run.io_bound(
-                BSEIPOCrawler().collect,
-                csrc_industry=industry,
-            )
-        return await run.io_bound(
-            SZSEIPOCrawler().collect,
-            industry=industry,
-        )
+        # 单所无中间进度: 不确定态呈现, 完成后置满.
+        self._show_crawl_bar = True
+        self._crawl_indeterminate = True
+        self._crawl_done = 0
+        self._crawl_total = 1
+        self._crawl_progress = 0.0
+        try:
+            if source == 'sse':
+                files = await run.io_bound(
+                    SSEIPOCrawler().collect,
+                    csrc_code=industry,
+                    issue_market_type='1,2',
+                )
+            elif source == 'bse':
+                files = await run.io_bound(
+                    BSEIPOCrawler().collect,
+                    csrc_industry=industry,
+                )
+            else:
+                files = await run.io_bound(
+                    SZSEIPOCrawler().collect,
+                    industry=industry,
+                )
+        finally:
+            self._crawl_indeterminate = False
+        self._crawl_done = 1
+        self._crawl_progress = 1.0
+        return files
 
     # --------------------------------------------------
     # 上传逻辑
@@ -516,12 +616,42 @@ class OperationPanel:
             platform: 目标平台标识 (aliyun/volc).
         """
         platform_name = PLATFORM_OPTIONS.get(platform, platform)
-        for source, files in files_map.items():
+        items = list(files_map.items())
+        # 后缀总数: 当前所基线 + 后序所总量构成全局分母;
+        # 降级重传使单所分母动态增长, 回调侧重算并鉗制比例.
+        suffix = [0] * (len(items) + 1)
+        for i in range(len(items) - 1, -1, -1):
+            suffix[i] = suffix[i + 1] + len(items[i][1])
+        self._show_upload_bar = True
+        self._upload_done = 0
+        self._upload_total = suffix[0]
+        self._upload_progress = 0.0
+        for i, (source, files) in enumerate(items):
             logger.info(
                 '开始上传到 {} | 数据源: {}', platform_name, source
             )
             aligner = self._build_aligner(platform, source)
-            await aligner.align(files)
+            cur_base = self._upload_done
+            rest = suffix[i + 1]
+
+            def on_progress(
+                done: int,
+                total: int,
+                cur_base: int = cur_base,
+                rest: int = rest,
+            ) -> None:
+                """单所进度汇入全局分子/分母."""
+                self._upload_done = cur_base + done
+                self._upload_total = cur_base + total + rest
+                self._upload_progress = (
+                    min(
+                        self._upload_done / self._upload_total,
+                        1.0,
+                    )
+                    if self._upload_total else 0.0
+                )
+
+            await aligner.align(files, on_progress=on_progress)
 
     async def _upload_single(
         self,
@@ -540,12 +670,37 @@ class OperationPanel:
         logger.info(
             '开始上传到 {} | 数据源: {}', platform_name, source
         )
+        self._show_upload_bar = True
+        self._upload_done = 0
+        self._upload_total = len(files)
+        self._upload_progress = 0.0
+
+        def on_progress(done: int, total: int) -> None:
+            """单所进度直接作为整体比例."""
+            self._upload_done = done
+            self._upload_total = total
+            self._upload_progress = (
+                min(done / total, 1.0) if total else 0.0
+            )
+
         aligner = self._build_aligner(platform, source)
-        await aligner.align(files)
+        await aligner.align(files, on_progress=on_progress)
 
     # --------------------------------------------------
     # UI 状态管理
     # --------------------------------------------------
+    def _reset_progress_ui(self) -> None:
+        """进度字段归零并隐藏 (任务开始与结束时调用)."""
+        self._show_crawl_bar = False
+        self._show_upload_bar = False
+        self._crawl_done = 0
+        self._crawl_total = 0
+        self._crawl_progress = 0.0
+        self._crawl_indeterminate = False
+        self._upload_done = 0
+        self._upload_total = 0
+        self._upload_progress = 0.0
+
     def _refresh_ui_state(self) -> None:
         """根据 _running 状态刷新所有操作按钮灰化."""
         if self._running:
@@ -570,3 +725,27 @@ class OperationPanel:
                     self._btn_upload.disable()
             if self._spinner:
                 self._spinner.visible = False
+        # 进度区渲染: 后台协程只写字段, 此处统一下发.
+        if self._progress_col:
+            self._progress_col.visible = (
+                self._show_crawl_bar or self._show_upload_bar
+            )
+        if self._crawl_row:
+            self._crawl_row.visible = self._show_crawl_bar
+        if self._crawl_bar:
+            self._crawl_bar.indeterminate = (
+                self._crawl_indeterminate
+            )
+            self._crawl_bar.value = self._crawl_progress
+        if self._crawl_count:
+            self._crawl_count.text = (
+                f'{self._crawl_done}/{self._crawl_total}'
+            )
+        if self._upload_row:
+            self._upload_row.visible = self._show_upload_bar
+        if self._upload_bar:
+            self._upload_bar.value = self._upload_progress
+        if self._upload_count:
+            self._upload_count.text = (
+                f'{self._upload_done}/{self._upload_total}'
+            )
