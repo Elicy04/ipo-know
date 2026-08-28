@@ -28,6 +28,25 @@ _STAGED_FILE_TYPE_RE = re.compile(r'^I00\d[123]$')
 # 在接口记录中 csrcCode 为 None, 按 C36 过滤查不到, 需按审核编号补查.
 EXTRA_AUDIT_NUMS: tuple[str, ...] = ('703', '1008')
 
+# 日期字符串中的非数字字符 (如连字符)
+_NON_DIGIT_RE = re.compile(r'\D+')
+
+
+def _project_year(raw: str | None) -> str:
+    """从日期串归一化出 4 位申报年份.
+
+    去非数字字符后取前 4 位, 兼容 YYYYMMDDHHMMSS 等格式;
+    数字不足 4 位视为缺失.
+
+    Args:
+        raw: 原始日期字符串, 可为 None.
+
+    Returns:
+        4 位数字年份字符串; 无法解析时为空串.
+    """
+    digits = _NON_DIGIT_RE.sub('', raw or '')
+    return digits[:4] if len(digits) >= 4 else ''
+
 
 def file_base_group(file_type_map: str) -> str:
     """返回文件类型的类别基组.
@@ -154,8 +173,8 @@ class SSEIPOCrawler:
             pairs = self._fetch_files(client, projects)
             valid_pairs = self._select_valid_files(pairs)
             files = [
-                self._build_record(file_item)
-                for _, file_item in valid_pairs
+                self._build_record(project, file_item)
+                for project, file_item in valid_pairs
             ]
             logger.info(
                 '有效文件筛选完成 | 有效 {} / 原始 {} 个',
@@ -337,15 +356,21 @@ class SSEIPOCrawler:
     # 输出
     # ==================================================
     @staticmethod
-    def _build_record(file_item: FileItem) -> dict[str, Any]:
-        """将文件条目转换为清单记录, filePath 拼接为完整下载 URL.
+    def _build_record(
+        project: IPOProjectItem,
+        file_item: FileItem,
+    ) -> dict[str, Any]:
+        """将项目与文件条目转换为清单记录, filePath 拼接为完整下载 URL.
 
         Args:
+            project: 单个 IPO 项目条目, 提供申报年份来源.
             file_item: 单个披露文件条目.
 
         Returns:
-            与 FileItem 字段一致的字典, 其中 filePath 为完整 URL.
+            与 FileItem 字段一致的字典, 其中 filePath 为完整 URL,
+            projectYear 取审核受理日期前 4 位 (缺失为空串).
         """
         record = file_item.model_dump()
         record['filePath'] = build_download_url(file_item.filePath)
+        record['projectYear'] = _project_year(project.auditApplyDate)
         return record

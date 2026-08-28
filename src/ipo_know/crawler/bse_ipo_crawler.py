@@ -26,6 +26,22 @@ _STAGE_SUFFIX_RE = re.compile(r'[（(][^）)]*稿[）)]\s*$')
 _NON_DIGIT_RE = re.compile(r'\D+')
 
 
+def _project_year(raw: str | None) -> str:
+    """从受理日期串归一化出 4 位申报年份.
+
+    去非数字字符后取前 4 位, 兼容 YYYY-MM-DD 格式; 数字不足
+    4 位视为缺失.
+
+    Args:
+        raw: 原始日期字符串, 可为 None.
+
+    Returns:
+        4 位数字年份字符串; 无法解析时为空串.
+    """
+    digits = _NON_DIGIT_RE.sub('', raw or '')
+    return digits[:4] if len(digits) >= 4 else ''
+
+
 class BSEIPOCrawler:
     """北交所 IPO 披露文件爬虫.
 
@@ -281,7 +297,8 @@ class BSEIPOCrawler:
         Returns:
             与上交所格式兼容的字典; fileTypeMap 取披露类型编码
             disclosure_type, fileTitle 取披露标题, fileUpdTime
-            规范化为 YYYYMMDD 与上交所格式对齐.
+            规范化为 YYYYMMDD 与上交所格式对齐, projectYear 取受理
+            日期前 4 位 (缺失为空串).
         """
         return {
             'auditId': str(project.id),
@@ -295,4 +312,5 @@ class BSEIPOCrawler:
             )[:8],
             'fileTypeMap': file_item.disclosure_type or '',
             'fileTitle': file_item.disclosure_title or '',
+            'projectYear': _project_year(project.receive_date),
         }

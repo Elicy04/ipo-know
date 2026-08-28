@@ -44,6 +44,22 @@ def normalize_upd_date(value: str | None) -> str:
     return _NON_DIGIT_RE.sub('', value or '')[:8]
 
 
+def _project_year(raw: str | None) -> str:
+    """从受理日期串归一化出 4 位申报年份.
+
+    去非数字字符后取前 4 位, 兼容 YYYY-MM-DD 与 YYYYMMDD
+    两种格式; 数字不足 4 位视为缺失.
+
+    Args:
+        raw: 原始日期字符串, 可为 None.
+
+    Returns:
+        4 位数字年份字符串; 无法解析时为空串.
+    """
+    digits = _NON_DIGIT_RE.sub('', raw or '')
+    return digits[:4] if len(digits) >= 4 else ''
+
+
 class SZSEIPOCrawler:
     """深交所注册制审核文件爬虫.
 
@@ -256,7 +272,8 @@ class SZSEIPOCrawler:
         Returns:
             文件清单字典, filePath 为完整下载 URL; fileTypeMap
             取材料名称 matnm, fileTitle 取文件名 dfnm,
-            fileUpdTime 规范化为 YYYYMMDD.
+            fileUpdTime 规范化为 YYYYMMDD, projectYear 取受理日期
+            前 4 位 (缺失为空串).
         """
         return {
             'auditId': str(project.prjid),
@@ -268,6 +285,7 @@ class SZSEIPOCrawler:
             'fileUpdTime': normalize_upd_date(file_item.ddt),
             'fileTypeMap': file_item.matnm or '',
             'fileTitle': file_item.dfnm or '',
+            'projectYear': _project_year(project.acptdt),
         }
 
     @staticmethod

@@ -51,7 +51,7 @@ class GUIConfigStore:
     """GUI 专属配置的 JSON 持久化存储.
 
     配置文件存放于 ``app_root()/data/config.json``,
-    与 :class:`FileMappingStore` 使用相同的存储根目录策略.
+    统一收敛在 ``app_root()`` 存储根目录下.
 
     Attributes:
         _path: 配置文件路径.
