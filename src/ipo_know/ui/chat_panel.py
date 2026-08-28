@@ -18,13 +18,19 @@ import threading
 from collections import deque
 
 import httpx
+from alibabacloud_bailian20231229 import models as bailian_models
 from loguru import logger
 from nicegui import background_tasks
 from nicegui import ui
+from nicegui.events import GenericEventArguments
 from nicegui.events import ScrollEventArguments
+from nicegui.events import UploadEventArguments
 
+from ipo_know.clients.aliyun_knowledge.client import AliyunKnowledgeClient
 from ipo_know.kb_query import SearchHit
 from ipo_know.kb_query import create_query_backend
+from ipo_know.ui.chat_attachments import ChatAttachments
+from ipo_know.ui.chat_attachments import SessionFile
 from ipo_know.ui.config_store import GUIConfigStore
 from ipo_know.ui.log_panel import LogPanel
 from ipo_know.ui.panel_helpers import error_summary
@@ -144,6 +150,14 @@ class ChatPanel:
         _current_label: 退化模式下的纯文本 label 引用.
         _usage: 本次回答的 token 用量 (尾流回传).
         _chat_supported: 当前平台问答能力位缓存.
+        _attachments: 会话附件状态容器 (仅阿里云平台启用).
+        _btn_attach: 附件上传按钮 (仅阿里云平台可见).
+        _file_upload: 隐藏的文件选择上传组件.
+        _dropzone_wrap: 拖拽覆盖层外层容器 (仅阿里云平台显示).
+        _dropzone: 拖拽上传覆盖层组件: 默认隐身不拦截交互,
+            拖入文件时显现虚线框提示, drop 落在组件自身由
+            Quasar QUploader 原生处理; 显现态下点击亦可选择文件.
+        _attach_row: 输入区上方的附件列表容器.
         _empty_state: 空会话欢迎区, 有消息时隐藏.
         _container: 面板根容器, 供后台任务恢复 UI 上下文.
     """
@@ -191,6 +205,12 @@ class ChatPanel:
         self._query_input: ui.textarea | None = None
         self._btn_send: ui.button | None = None
         self._btn_stop: ui.button | None = None
+        self._attachments = ChatAttachments()
+        self._btn_attach: ui.button | None = None
+        self._file_upload: ui.upload | None = None
+        self._dropzone_wrap: ui.column | None = None
+        self._dropzone: ui.upload | None = None
+        self._attach_row: ui.row | None = None
         self._messages_col: ui.column | None = None
         self._scroll_area: ui.scroll_area | None = None
         self._empty_state: ui.column | None = None
@@ -220,6 +240,7 @@ class ChatPanel:
         self._refresh_chat_support()
         self._stop_generation()
         self._reset_conversation()
+        self._refresh_attach_visibility()
         platform_name = PLATFORM_OPTIONS.get(platform, platform)
         safe_notify(
             self._container,
@@ -259,7 +280,9 @@ class ChatPanel:
     # --------------------------------------------------
     def _build_ui(self) -> None:
         """构建问答面板 UI 布局 (现代对话窗口风格)."""
-        container = ui.column().classes('w-full h-full gap-0')
+        container = ui.column().classes(
+            'relative w-full h-full gap-0'
+        )
         self._container = container
         with container:
             # 顶栏: 弱化的清空对话小图标 (右上角)
@@ -293,6 +316,15 @@ class ChatPanel:
                     'w-full gap-6'
                 )
 
+            # 附件列表: 输入区上方, 无附件时整体隐藏
+            self._attach_row = ui.row().classes(
+                'w-full flex-wrap gap-1 px-2'
+            )
+            self._attach_row.visible = False
+
+            # 拖拽上传覆盖层: 默认隐身铺满面板, 拖入文件时显现.
+            self._build_dropzone()
+
             # 输入区: 细线分隔 + 圆角大输入框 + 圆形按钮
             ui.separator().classes('w-full opacity-30')
             with ui.row().classes(
@@ -309,7 +341,43 @@ class ChatPanel:
                         ),
                     ).props(
                         'autogrow borderless dense'
-                    ).classes('w-full')
+                    ).classes('chat-query-input w-full')
+                    # 回车发送: 服务端复用发送入口触发发送;
+                    # 阻止默认换行由客户端捕获脚本承担 (服务端
+                    # 收到事件时默认行为已发生, 详见注入方法注释)
+                    self._query_input.on(
+                        'keydown',
+                        self._on_query_keydown,
+                        args=['key', 'shiftKey', 'isComposing'],
+                    )
+                    self._inject_query_input_script()
+                # 附件上传入口 (仅阿里云): 圆钮触发隐藏的
+                # ui.upload 文件选择; 隐藏组件不占布局空间,
+                # 事件回调不受 hidden 影响
+                self._btn_attach = ui.button(
+                    icon='attach_file',
+                    on_click=self._on_attach_click,
+                ).props('round flat').classes(
+                    'text-gray-400'
+                )
+                self._btn_attach.tooltip('上传附件（仅阿里云）')
+                self._file_upload = ui.upload(
+                    auto_upload=True,
+                    multiple=True,
+                    max_files=10,
+                    on_upload=self._on_file_uploaded,
+                ).props('hidden')
+                # QUploader 上传完成后文件滞留内部队列 (状态仅置为
+                # uploaded): 同名文件按 __key 被判重静默过滤, 且持续占
+                # 用 max-files 配额 (已核验 .venv quasar.umd.js 中
+                # processFiles 的 duplicate 过滤与 canAddFiles 判定),
+                # 故本批上传全部结束 (finish 事件, isUploading 由真转假)
+                # 后调用 reset() 清空队列, 保证后续上传正常触发.
+                self._file_upload.on(
+                    'finish',
+                    lambda _: self._file_upload.reset(),
+                    args=[],
+                )
                 # 停止与发送同位: 运行中显示停止图标,
                 # 空闲显示发送图标
                 self._btn_stop = ui.button(
@@ -331,6 +399,64 @@ class ChatPanel:
         )
         # 定时刷新发送/停止按钮状态
         ui.timer(0.5, self._refresh_btn_state)
+
+    def _on_query_keydown(self, e: GenericEventArguments) -> None:
+        """输入框按键回调: 普通回车触发发送.
+
+        Shift+Enter 保留默认换行; 输入法组合态忽略
+        (与客户端拦截脚本条件一致). 发送复用现有入口.
+
+        Args:
+            e: 按键事件, ``e.args`` 含 key/shiftKey/isComposing.
+        """
+        if e.args.get('key') != 'Enter':
+            return
+        if e.args.get('shiftKey'):
+            return
+        if e.args.get('isComposing'):
+            return
+        self._on_send()
+
+    def _inject_query_input_script(self) -> None:
+        """注入输入框回车拦截脚本 (幂等).
+
+        服务端监听 keydown 时默认换行已发生, 无法阻止;
+        故在客户端捕获阶段拦截: 普通回车阻止换行,
+        Shift+Enter 与输入法组合态放行. 发送动作仍由服务端
+        keydown 回调触发, 本脚本仅承担阻止换行职责.
+        """
+        ui.add_head_html(
+            """
+            <script>
+            if (!window.__ipoQueryInputHooked) {
+                window.__ipoQueryInputHooked = true;
+                const tryHook = () => {
+                    const ta = document.querySelector(
+                        '.chat-query-input textarea'
+                    );
+                    if (!ta) {
+                        return false;
+                    }
+                    ta.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter'
+                                && !e.shiftKey
+                                && !e.isComposing) {
+                            e.preventDefault();
+                        }
+                    }, true);
+                    return true;
+                };
+                if (!tryHook()) {
+                    const iv = setInterval(() => {
+                        if (tryHook()) {
+                            clearInterval(iv);
+                        }
+                    }, 200);
+                }
+            }
+            </script>
+            """
+        )
 
     def _build_empty_state(self) -> None:
         """构建空会话欢迎区: 居中引导文案."""
@@ -466,9 +592,15 @@ class ChatPanel:
                     type='warning',
                 )
                 return
+        # 发送触发即清空输入框 (不等 AI 回复), 双向绑定同步视图;
+        # 校验失败路径提前 return, 保留用户输入便于修改后重试.
+        if self._query_input is not None:
+            self._query_input.value = ''
         # 会话历史全量回传 (历史上限即请求保留条数) + 本次提问
         messages: list[dict[str, str]] = list(self._history)
         messages.append({'role': 'user', 'content': query})
+        # 就绪附件的平台侧文件 ID 快照 (仅阿里云产出)
+        session_ids = self._attachments.file_ids()
         self._prepare_bubbles(query)
         # 段四: 启动后台任务 (代次号先递增, 任务持快照)
         self._running = True
@@ -476,7 +608,10 @@ class ChatPanel:
         self._run_id += 1
         # 段五: try-finally 由后台协程承担
         self._task = background_tasks.create(
-            self._run_chat(query, platform, messages),
+            self._run_chat(
+                query, platform, messages,
+                session_files=session_ids or None,
+            ),
             name='kb chat',
         )
 
@@ -507,6 +642,9 @@ class ChatPanel:
         """
         self._run_id += 1
         self._history.clear()
+        # 清空对话同时清空输入框内未发送的内容.
+        if self._query_input is not None:
+            self._query_input.value = ''
         if self._messages_col is not None:
             self._messages_col.clear()
         if self._empty_state is not None:
@@ -530,8 +668,332 @@ class ChatPanel:
         self._thinking_flushed_length = 0
         self._thinking_degraded = False
         self._usage = None
+        # 附件清理: 清空状态列表, 已注册的远端临时文件后台删除;
+        # 上传组件内部队列同步重置, 避免滞留文件干扰后续上传判重与配额.
+        removed = self._attachments.clear()
+        self._reset_uploaders()
+        self._render_attach_list()
+        for sf in removed:
+            if sf.file_id:
+                background_tasks.create(
+                    self._delete_remote_file(sf.file_id),
+                    name='attach cleanup',
+                )
         if self._flush_timer is not None:
             self._flush_timer.deactivate()
+
+    # --------------------------------------------------
+    # 附件管理 (仅阿里云平台)
+    # --------------------------------------------------
+    def _on_attach_click(self) -> None:
+        """点击附件按钮触发隐藏上传组件的文件选择."""
+        if self._file_upload is not None:
+            self._file_upload.run_method('pickFiles')
+
+    async def _on_file_uploaded(
+        self, e: UploadEventArguments
+    ) -> None:
+        """文件上传回调: 校验后登记并启动后台上传.
+
+        NiceGUI 3.x 事件携带 ``FileUpload`` 对象: 名称与
+        大小同步可读, 内容须异步读取.
+
+        Args:
+            e: 上传事件, ``e.file`` 为单个文件对象.
+        """
+        name = e.file.name
+        size = e.file.size()
+        logger.info(
+            '收到附件上传事件 | file={} | size={}', name, size,
+        )
+        # 上传事件到达即强制拖拽覆盖层恢复隐身 (服务端兜底,
+        # 不依赖客户端 drop 监听)
+        self._hide_dropzone()
+        error = self._attachments.validate(name, size)
+        if error:
+            logger.warning(
+                '附件校验失败 | file={} | reason={}',
+                name, error,
+            )
+            safe_notify(
+                self._container, error, type='negative'
+            )
+            return
+        content = await e.file.read()
+        sf = self._attachments.add(name, len(content))
+        self._render_attach_list()
+        background_tasks.create(
+            self._upload_attachment(sf, content),
+            name='attach upload',
+        )
+
+    def _get_aliyun_client(self) -> AliyunKnowledgeClient:
+        """按当前已保存配置构造阿里云知识库客户端.
+
+        Returns:
+            新建的客户端实例 (上传/解析/删除临时附件用).
+        """
+        kwargs = self._store.get_aliyun_client_kwargs()
+        return AliyunKnowledgeClient(**kwargs)  # type: ignore[arg-type]
+
+    async def _upload_attachment(
+        self, sf: SessionFile, content: bytes
+    ) -> None:
+        """后台上传附件到阿里云数据中心并等待解析.
+
+        状态迁移 uploading → parsing → ready/failed 由本协程
+        直接回写附件记录并刷新列表渲染; 上传与解析接口为客户端
+        原生 async 方法, 直接 await 无需转线程.
+
+        Args:
+            sf: 会话附件记录.
+            content: 文件字节内容.
+        """
+        try:
+            client = self._get_aliyun_client()
+            file_id = await client.upload_session_file(
+                file_name=sf.name, content=content
+            )
+            sf.file_id = file_id
+            sf.status = 'parsing'
+            self._render_attach_list()
+            await client.wait_session_file_ready(file_id)
+            sf.status = 'ready'
+            logger.info(
+                '附件解析完成 | file={} | file_id={}',
+                sf.name, file_id,
+            )
+        except Exception as exc:
+            sf.status = 'failed'
+            logger.error(
+                '附件上传失败 | file={} | {}',
+                sf.name, exc,
+            )
+        self._render_attach_list()
+
+    def _render_attach_list(self) -> None:
+        """重新渲染附件文件列表 (状态图标 + 文件名 + 移除钮)."""
+        if self._attach_row is None:
+            return
+        self._attach_row.clear()
+        files = self._attachments.all_files
+        self._attach_row.visible = bool(files)
+        if not files:
+            return
+        with self._attach_row:
+            for sf in files:
+                icon = {
+                    'uploading': 'upload',
+                    'parsing': 'hourglass_top',
+                    'ready': 'check_circle',
+                    'failed': 'error',
+                }.get(sf.status, 'help')
+                color = {
+                    'uploading': 'text-gray-400',
+                    'parsing': 'text-yellow-400',
+                    'ready': 'text-green-400',
+                    'failed': 'text-red-400',
+                }.get(sf.status, 'text-gray-400')
+                with ui.row().classes(
+                    'items-center gap-1 rounded-lg '
+                    'bg-white/5 px-2 py-0.5 text-xs'
+                ):
+                    ui.icon(icon).classes(
+                        f'text-sm {color}'
+                    )
+                    ui.label(sf.name).classes(
+                        'max-w-[120px] truncate'
+                    )
+                    ui.button(
+                        icon='close',
+                        on_click=lambda _, n=sf.name: (
+                            self._on_remove_attach(n)
+                        ),
+                    ).props('flat dense size=xs').classes(
+                        'text-gray-500'
+                    )
+
+    def _on_remove_attach(self, name: str) -> None:
+        """移除附件并后台清理数据中心文件.
+
+        Args:
+            name: 待移除附件的文件名.
+        """
+        sf = self._attachments.remove(name)
+        self._render_attach_list()
+        if sf is not None and sf.file_id:
+            background_tasks.create(
+                self._delete_remote_file(sf.file_id),
+                name='attach cleanup',
+            )
+
+    async def _delete_remote_file(self, file_id: str) -> None:
+        """后台删除数据中心临时附件文件 (失败仅告警).
+
+        Args:
+            file_id: 平台侧文件 ID.
+        """
+        try:
+            client = self._get_aliyun_client()
+            await client.delete_files(
+                bailian_models.DeleteFilesRequest(
+                    file_ids=[file_id]
+                )
+            )
+        except Exception:
+            logger.warning(
+                '附件远程清理失败 | file_id={}', file_id,
+            )
+
+    def _build_dropzone(self) -> None:
+        """构建拖拽上传覆盖层 (默认隐身, 拖入文件时显现).
+
+        覆盖层铺满面板根容器 (absolute), 默认 opacity-0 +
+        pointer-events-none 不拦截任何交互; 拖入窗口时由注入的
+        全局脚本按 window 级 dragenter/dragover 切换为可见可接收态,
+        drop 落在 ui.upload 组件自身由 QUploader 原生处理 (已核验
+        .venv 中 quasar.umd.js 的 onDragover/getDndNode/onDrop);
+        drop/拖离窗口后恢复隐身. 元素选择器用 .classes() 渲染到根
+        元素的自定义 class (Vue props 不会渲染为 DOM 属性, 早期
+        data-* 方案因此静默失败); 查找在事件处理器内进行, 规避
+        脚本与元素创建时序问题.
+        """
+        ui.add_head_html('''
+<style>
+.chat-dropzone .q-uploader__header,
+.chat-dropzone .q-uploader__list {
+    display: none !important;
+}
+.chat-dropzone {
+    background: rgba(59, 130, 246, 0.08);
+}
+</style>
+<script>
+if (!window.__ipoDropzoneHooked) {
+  window.__ipoDropzoneHooked = true;
+  const findDz = () =>
+    document.querySelector('.ipo-dropzone');
+  // 兜底定时器: 显现态下拖拽事件不再到达 (如悬停不松手、
+  // 窗口失焦) 超时后强制恢复隐身; 拖拽中 dragover 持续刷新计时.
+  let dzTimer = null;
+  const armDzTimer = () => {
+    if (dzTimer) clearTimeout(dzTimer);
+    dzTimer = setTimeout(() => setDz(false), 10000);
+  };
+  const setDz = (active) => {
+    const dz = findDz();
+    if (!dz) return;
+    if (active) {
+      dz.classList.remove('opacity-0', 'pointer-events-none');
+      dz.classList.add('opacity-100', 'pointer-events-auto');
+      armDzTimer();
+    } else {
+      if (dzTimer) {
+        clearTimeout(dzTimer);
+        dzTimer = null;
+      }
+      dz.classList.remove('opacity-100', 'pointer-events-auto');
+      dz.classList.add('opacity-0', 'pointer-events-none');
+    }
+  };
+  // 仅覆盖层实际可见 (非阿里云时 display: none, offsetParent
+  // 为 null) 时才接管拖拽, 避免非附件平台吞掉默认行为.
+  const dzAvailable = () => {
+    const dz = findDz();
+    return !!dz && dz.offsetParent !== null;
+  };
+  // dragover 必须 preventDefault, 否则浏览器不派发 drop.
+  ['dragenter', 'dragover'].forEach((t) =>
+    window.addEventListener(t, (e) => {
+      if (!dzAvailable()) return;
+      e.preventDefault();
+      setDz(true);
+    })
+  );
+  // QUploader 的 onDrop/onDragleave 内部调用 stopAndPrevent
+  // (已核验 .venv 中 quasar.umd.js), stopPropagation 阻断事件冒泡,
+  // 故隐藏类监听必须用捕获阶段 (第三参数 true).
+  ['drop', 'dragend'].forEach((t) =>
+    window.addEventListener(t, () => setDz(false), true)
+  );
+  // relatedTarget 非空说明仍在窗口内移动, 非真正离开.
+  window.addEventListener('dragleave', (e) => {
+    if (e.relatedTarget) return;
+    setDz(false);
+  }, true);
+}
+</script>
+''')
+        with ui.column().classes(
+            'ipo-dropzone absolute inset-0 z-40 opacity-0 '
+            'pointer-events-none transition-opacity '
+            'duration-200'
+        ) as wrap:
+            self._dropzone_wrap = wrap
+            dropzone = ui.upload(
+                auto_upload=True,
+                multiple=True,
+                max_files=10,
+                on_upload=self._on_file_uploaded,
+            ).props('flat').classes(
+                'chat-dropzone h-full w-full '
+                'cursor-pointer rounded-lg border-2 '
+                'border-dashed border-blue-400/70'
+            )
+            # 本批上传全部结束后重置内部队列 (理由同 _file_upload)
+            dropzone.on(
+                'finish',
+                lambda _: dropzone.reset(),
+                args=[],
+            )
+            # click 非 QUploader 声明事件, 经 Vue attrs 透传绑定到根元素,
+            # 显现状态下点击即触发文件选择 (隐藏 input 由 pickFiles 唤起).
+            dropzone.on(
+                'click', lambda _: dropzone.run_method('pickFiles')
+            )
+            ui.label('松开以上传附件（仅阿里云）').classes(
+                'pointer-events-none absolute inset-0 flex '
+                'items-center justify-center text-sm '
+                'text-blue-200'
+            )
+        self._dropzone = dropzone
+
+    def _hide_dropzone(self) -> None:
+        """强制拖拽覆盖层恢复隐身态 (服务端兜底).
+
+        显现/隐身的 class 平时由客户端 JS 切换, 服务端维护的
+        class 恒为隐身基态; 此处先归一化再 update(), 把权威基态
+        class 整体下发覆盖客户端可能残留的显现态类名. 仅操作
+        class 不碰 visible, 不影响平台联动.
+        """
+        if self._dropzone_wrap is None:
+            return
+        self._dropzone_wrap.classes(
+            remove='opacity-100 pointer-events-auto',
+            add='opacity-0 pointer-events-none',
+        )
+        self._dropzone_wrap.update()
+
+    def _reset_uploaders(self) -> None:
+        """重置两个上传组件的内部队列 (幂等).
+
+        QUploader 上传完成后文件滞留队列, 同名文件会被判重过滤,
+        且滞留文件持续占用 max-files 配额, 必须 reset 后才能再次上传.
+        """
+        for uploader in (self._file_upload, self._dropzone):
+            if uploader is not None:
+                uploader.reset()
+
+    def _refresh_attach_visibility(self) -> None:
+        """按当前平台刷新附件入口可见性 (仅阿里云显示).
+
+        拖拽区随外层容器整体显隐, 非阿里云时不占布局不拦截交互.
+        """
+        enabled = self._platform == 'aliyun'
+        if self._btn_attach is not None:
+            self._btn_attach.visible = enabled
+        if self._dropzone_wrap is not None:
+            self._dropzone_wrap.visible = enabled
 
     # --------------------------------------------------
     # 消息行准备
@@ -609,6 +1071,7 @@ class ChatPanel:
         query: str,
         platform: str,
         messages: list[dict[str, str]],
+        session_files: list[str] | None = None,
     ) -> None:
         """后台消费问答事件流并驱动消息渲染.
 
@@ -620,6 +1083,8 @@ class ChatPanel:
             query: 用户提问文本快照.
             platform: 目标平台标识快照.
             messages: 全量回传的消息序列快照.
+            session_files: 就绪附件的平台侧文件 ID 列表快照,
+                为空时不携带 (火山后端忽略该参数).
         """
         run_id = self._run_id
         logger.info(
@@ -632,7 +1097,9 @@ class ChatPanel:
         try:
             backend = create_query_backend(platform, self._store)
             stream = backend.stream_chat(
-                messages, stop_event=self._stop_event
+                messages,
+                stop_event=self._stop_event,
+                session_files=session_files,
             )
             first_event_seen = False
             async for event in stream:
@@ -1100,3 +1567,13 @@ class ChatPanel:
                 self._btn_send.enable()
         if self._btn_stop is not None:
             self._btn_stop.visible = self._running
+        # 附件入口与拖拽区仅阿里云平台可见 (定时兜底,
+        # 覆盖初始与切换)
+        if self._btn_attach is not None:
+            self._btn_attach.visible = (
+                self._platform == 'aliyun'
+            )
+        if self._dropzone_wrap is not None:
+            self._dropzone_wrap.visible = (
+                self._platform == 'aliyun'
+            )

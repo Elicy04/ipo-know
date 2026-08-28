@@ -168,6 +168,7 @@ class AliyunQueryBackend:
         messages: Sequence[Mapping[str, str]],
         *,
         stop_event: threading.Event | None = None,
+        session_files: Sequence[str] | None = None,
     ) -> AsyncIterator[ChatStreamEvent]:
         """调用知识问答 SSE 接口并规整三阶段帧为事件流.
 
@@ -181,6 +182,8 @@ class AliyunQueryBackend:
             messages: role/content 消息序列, 全量回传.
             stop_event: 停止标志, 置位后尽快停止产出
                 (停止路径不补发 done).
+            session_files: 会话临时文件 ID 列表, 经 AddFile
+                接口注册并解析完成, 为空时不携带.
 
         Yields:
             reasoning_delta (规划段增量) / references (引用
@@ -216,7 +219,9 @@ class AliyunQueryBackend:
         error_seen = False
         stopped = False
         try:
-            stream = chat_client.stream_chat(messages)
+            stream = chat_client.stream_chat(
+                messages, session_files=session_files
+            )
             async for event in stream:
                 if (
                     stop_event is not None
