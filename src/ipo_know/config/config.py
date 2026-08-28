@@ -152,6 +152,8 @@ class AliyunKnowledgeSettings(pydantic.BaseModel):
         IPO_KNOW_ALIYUN_KNOWLEDGE__TIMEOUT=...
         IPO_KNOW_ALIYUN_KNOWLEDGE__API_KEY=...
         IPO_KNOW_ALIYUN_KNOWLEDGE__AGENT_ID=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__CHUNK_MODE=...
+        IPO_KNOW_ALIYUN_KNOWLEDGE__CHUNK_SIZE=...
 
     Attributes:
         ak: 阿里云 AccessKey ID, 敏感信息。
@@ -167,6 +169,11 @@ class AliyunKnowledgeSettings(pydantic.BaseModel):
             Bearer 鉴权的独立 REST 链路, AK/SK 不可用.
         agent_id: 知识问答服务应用 ID (aid-xxx), 仅知识问答
             使用, 在百炼控制台知识问答页面创建并发布后获取.
+        chunk_mode: 文档入索引切片模式, 空串走平台智能切分;
+            枚举 length(按长度)/page(按页)/h1~h5(按标题),
+            regex 依赖未暴露的 Separator 参数, 故不支持.
+        chunk_size: 单个切片字符数上限, 官方范围 1-6000 (官方默认 500),
+            智能切分下为软截断, 自定义切分下强制切割.
     """
 
     ak: str = ''
@@ -186,6 +193,8 @@ class AliyunKnowledgeSettings(pydantic.BaseModel):
         default='',
         description='知识问答服务应用 ID(aid-xxx), 仅知识问答使用',
     )
+    chunk_mode: str = ''
+    chunk_size: int = 1536
 
 
 class EastmoneySettings(pydantic.BaseModel):
