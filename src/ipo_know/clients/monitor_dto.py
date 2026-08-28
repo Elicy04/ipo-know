@@ -71,3 +71,55 @@ class BillDetailItem:
     amount: str
     payment_method: str
     remark: str
+
+
+@dataclass(frozen=True)
+class InstanceBillItem:
+    """实例级消费账单条目 (DescribeInstanceBill).
+
+    对应阿里云费用中心产品/实例粒度的消费账单, 与账户资金
+    流水 (BillDetailItem) 互补: 前者见消费构成, 后者见充值/退款.
+    金额字段统一为 float (None 安全, 缺省 0.0), 其余为 str.
+
+    Attributes:
+        billing_cycle: 账期, 格式 'YYYY-MM'.
+        billing_date: 账单日, 格式 'YYYY-MM-DD';
+            MONTHLY 粒度时为空串.
+        product_name: 产品名称 (如「大模型服务平台百炼」).
+        product_detail: 产品明细 (计费模块/商品描述).
+        instance_id: 实例 ID.
+        instance_spec: 实例规格/配置.
+        billing_item: 计费项 (仅 IsBillingItem=true 时有值).
+        item_type: 账单类型原始枚举 (SubscriptionOrder/
+            PayAsYouGoBill/Refund/Adjustment 等).
+        subscription_type: 订阅类型原始枚举 (Subscription/
+            PayAsYouGo).
+        pretax_amount: 应付金额.
+        pretax_gross_amount: 原价 (目录价总额).
+        invoice_discount: 优惠金额.
+        payment_amount: 现金支付金额.
+        deducted_by_cash_coupons: 代金券抵扣金额.
+        deducted_by_prepaid_card: 储值卡抵扣金额.
+        currency: 币种 (CNY 等).
+        usage: 用量 (仅 IsBillingItem=true 时有值).
+        usage_unit: 用量单位.
+    """
+
+    billing_cycle: str
+    billing_date: str
+    product_name: str
+    product_detail: str
+    instance_id: str
+    instance_spec: str
+    billing_item: str
+    item_type: str
+    subscription_type: str
+    pretax_amount: float
+    pretax_gross_amount: float
+    invoice_discount: float
+    payment_amount: float
+    deducted_by_cash_coupons: float
+    deducted_by_prepaid_card: float
+    currency: str
+    usage: float
+    usage_unit: str
