@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
@@ -456,6 +457,7 @@ class VolcKBAligner:
         valid_files: list[dict[str, Any]],
         *,
         dry_run: bool = False,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> AlignReport:
         """以有效文件清单为基准全量对齐知识库.
 
@@ -466,6 +468,9 @@ class VolcKBAligner:
         Args:
             valid_files: crawler collect 返回的有效文件清单.
             dry_run: 为 True 时只输出差异不执行增删.
+            on_progress: 可选进度回调 (已完成篇数, 待补充总篇数);
+                补充阶段每完成一篇回调一次, 成功/去重跳过/失败均计.
+                预演模式不回调.
 
         Returns:
             对齐执行结果报告.
@@ -507,7 +512,7 @@ class VolcKBAligner:
             self._log_dry_run(to_add, to_delete)
             return report
 
-        await self._add_all(to_add, report)
+        await self._add_all(to_add, report, on_progress)
         await self._delete_all(to_delete, report)
         await self._verify_added(report)
 
@@ -524,6 +529,7 @@ class VolcKBAligner:
         self,
         to_add: list[dict[str, Any]],
         report: AlignReport,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> None:
         """并发补充文档, 以 UPLOAD_CONCURRENCY 限流.
 
@@ -532,16 +538,22 @@ class VolcKBAligner:
         Args:
             to_add: 待补充的文件清单条目.
             report: 执行结果报告, 原地更新.
+            on_progress: 可选进度回调 (已完成篇数, 总篇数).
         """
         if not to_add:
             return
         total = len(to_add)
         semaphore = asyncio.Semaphore(UPLOAD_CONCURRENCY)
+        done = 0
 
         async def worker(idx: int, record: dict[str, Any]) -> None:
             """限流并发执行单篇文档补充."""
+            nonlocal done
             async with semaphore:
                 await self._add_doc(record, report, idx, total)
+            done += 1
+            if on_progress is not None:
+                on_progress(done, total)
 
         await asyncio.gather(
             *(worker(i, r) for i, r in enumerate(to_add, 1)),
