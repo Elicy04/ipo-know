@@ -1,4 +1,13 @@
 # .github/release.yml
+#
+# GitHub 自动生成 Release Notes 的分类配置（供 generate_release_notes 使用）。
+# 分类依据是 PR 合并前打上的标签，标签集共 8 类，
+# 约定详见 docs/governance/git_spec.md「PR 标签约定」一节：
+#   enhancement / bug / documentation / chore / refactor /
+#   ci / dependencies / breaking-change
+#
+# 注意：标签必须在 PR 合并前打好，否则对应 PR 会落入「其他变更」。
+# 带破坏性变更的 PR 除基础分类标签外，需额外加打 breaking-change。
 
 changelog:
   # 排除这些标签的 PR（不显示在 Release Notes 中）
@@ -6,43 +15,43 @@ changelog:
     labels:
       - ignore-for-release
       - skip-changelog
-    # 也可以排除特定作者
-    # authors:
-    #   - dependabot
 
-  # 定义分类规则（按优先级从上到下匹配）
+  # 定义分类规则（按从上到下的顺序匹配，命中即归类）
   categories:
-    - title: "💥 破坏性变更 (Breaking Changes)"
+    # 破坏性变更置顶，优先展示
+    - title: "💥 破坏性变更 Breaking Changes"
       labels:
         - breaking-change
-        - Semver-Major
 
-    - title: "🚀 新功能 (New Features)"
+    - title: "✨ 新功能 New Features"
       labels:
         - enhancement
-        - feature
-        - Semver-Minor
-        - type:feat
 
-    - title: "🐛 Bug 修复 (Bug Fixes)"
+    - title: "🐛 Bug 修复 Bug Fixes"
       labels:
         - bug
-        - fix
-        - type:fix
-        - Semver-Patch
 
-    - title: "📝 文档 (Documentation)"
-      labels:
-        - documentation
-        - docs
-
-    - title: "🧹 维护与重构 (Maintenance & Refactoring)"
+    - title: "♻️ 重构 Refactoring"
       labels:
         - refactor
-        - chore
-        - maintenance
 
-    # 通配符：匹配以上未覆盖的所有 PR，作为"其他变更"
-    - title: "📌 其他变更 (Other Changes)"
+    - title: "📝 文档 Documentation"
+      labels:
+        - documentation
+
+    - title: "👷 持续集成 CI"
+      labels:
+        - ci
+
+    - title: "⬆️ 依赖更新 Dependencies"
+      labels:
+        - dependencies
+
+    - title: "🧹 杂务 Chore"
+      labels:
+        - chore
+
+    # 通配符：兜底分类，收集未打上述标签的 PR
+    - title: "📌 其他变更 Other Changes"
       labels:
         - "*"

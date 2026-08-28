@@ -1,0 +1,59 @@
+# 标签触发的自动发布工作流
+#
+# 触发条件：推送正式版标签（vX.Y.Z，如 v0.2.2）。
+# glob 模式 'v[0-9]+.[0-9]+.[0-9]+' 天然排除预发布标签（如 v0.3.0-rc.1）。
+#
+# 流程：检出代码 → uv 同步依赖（dev 组含 PyInstaller）→ build.ps1 打包
+# → 7z 压缩产物目录 → 创建 GitHub Release（自动生成分类 Release Notes）。
+# 分类规则见 .github/release.yml，标签约定见 docs/governance/git_spec.md。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv 与 Python
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.11'
+
+      - name: 同步依赖（dev 组含 PyInstaller 与 ruff）
+        run: uv sync --frozen
+
+      - name: PyInstaller 打包（产物 dist\ipo-know，脚本自带完整性校验）
+        run: .\build.ps1 -Clean
+
+      - name: 构建失败时上传构建日志便于排障
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyinstaller-build-log
+          path: pyinstaller_build.log
+          if-no-files-found: ignore
+
+      - name: 压缩产物为便携版 zip（仅 dist\ipo-know 子目录）
+        run: |
+          & "C:\Program Files\7-Zip\7z.exe" a -tzip `
+            "dist\ipo-know_${{ github.ref_name }}-win-x64-portable.zip" `
+            "dist\ipo-know"
+          if ($LASTEXITCODE -ne 0) { throw "7z 压缩失败（退出码 $LASTEXITCODE）" }
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/ipo-know_${{ github.ref_name }}-win-x64-portable.zip
