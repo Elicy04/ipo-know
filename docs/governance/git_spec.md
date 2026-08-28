@@ -15,6 +15,25 @@ date created: July 28th 2026, 12:59 pm
 使用命令 `uv run ruff check <相对路径>`即可检查代码格式是否符合规范。（相对路径写 . 表示当前整个项目目录）
 修复建议采用AI方案，由于ruff目前还不能直接接入AI,所以采用的方案是 `提示词模板+可视化变动和允许回退的IDE 进行修复`。
 
+## PR 标签约定
+
+PR 合并前需手动打上分类标签，这些标签驱动 GitHub Release Notes 的自动分类（分类规则见 `.github/release.yml`，由发布工作流在打正式版标签时套用）。
+标签集共 8 类，与 Conventional Commits 前缀的对应关系如下：
+| 标签 | 对应 Conventional Commits 前缀 | 说明 |
+| --- | --- | --- |
+| `enhancement` | `feat`、`perf` | 新功能、体验优化、性能改进 |
+| `bug` | `fix` | 缺陷修复 |
+| `documentation` | `docs` | 仅文档改动 |
+| `chore` | `chore` | 杂务，不影响功能与构建的琐碎改动 |
+| `refactor` | `refactor` | 重构，不改变外部行为 |
+| `ci` | `ci`、`test` | CI 配置、工作流与测试相关 |
+| `dependencies` | `build`、依赖升级 | 构建系统与依赖变更 |
+| `breaking-change` | 任意 | 破坏性变更，需在基础分类标签之外**额外**加打 |
+注意事项：
+- 标签必须在 PR **合并前**打好，否则该 PR 会被归入 Release Notes 的「其他变更」兜底分类。
+- 不需要出现在 Release Notes 中的 PR（如仓库配置微调），可打 `ignore-for-release` 或 `skip-changelog` 标签将其排除。
+- 发布工作流仅由正式版标签（`vX.Y.Z`）触发，预发布标签（如 `v0.3.0-rc.1`）不会触发。
+
 ## commit message 规范
 本项目采用<span style="color:#000; background:#fff59d; font-weight:bold;">Conventional Commits</span>
 >Conventional Commits（约定式提交）是一套轻量级的 Git 提交信息规范，它为提交消息定义了统一的结构化格式，让提交历史具备**可读性、可追溯性、可自动化处理**的特性。该规范脱胎于 Angular 团队的提交准则，现已成为业界广泛采用的通用标准，官方定义站点为 [conventionalcommits.org](https://www.conventionalcommits.org)
