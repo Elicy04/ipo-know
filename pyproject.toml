@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ipo-know"
-version = "0.1.0"
+version = "0.2.2"
 description = "IPO Know - 上交所IPO信息披露数据采集与分析平台"
 requires-python = ">=3.11"
 dependencies = [
@@ -35,6 +35,7 @@ where = ["src"]
 
 [dependency-groups]
 dev = [
+    "pyinstaller==6.22.2",
     "ruff>=0.16.0",
 ]
 
