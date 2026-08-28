@@ -1,0 +1,48 @@
+# .github/release.yml
+
+changelog:
+  # 排除这些标签的 PR（不显示在 Release Notes 中）
+  exclude:
+    labels:
+      - ignore-for-release
+      - skip-changelog
+    # 也可以排除特定作者
+    # authors:
+    #   - dependabot
+
+  # 定义分类规则（按优先级从上到下匹配）
+  categories:
+    - title: "💥 破坏性变更 (Breaking Changes)"
+      labels:
+        - breaking-change
+        - Semver-Major
+
+    - title: "🚀 新功能 (New Features)"
+      labels:
+        - enhancement
+        - feature
+        - Semver-Minor
+        - type:feat
+
+    - title: "🐛 Bug 修复 (Bug Fixes)"
+      labels:
+        - bug
+        - fix
+        - type:fix
+        - Semver-Patch
+
+    - title: "📝 文档 (Documentation)"
+      labels:
+        - documentation
+        - docs
+
+    - title: "🧹 维护与重构 (Maintenance & Refactoring)"
+      labels:
+        - refactor
+        - chore
+        - maintenance
+
+    # 通配符：匹配以上未覆盖的所有 PR，作为"其他变更"
+    - title: "📌 其他变更 (Other Changes)"
+      labels:
+        - "*"
