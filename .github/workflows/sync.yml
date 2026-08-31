@@ -1,0 +1,35 @@
+name: Sync Release to Gitee
+
+# 触发条件：仅在发布新 Release 时触发
+on:
+  release:
+    types: [published]
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+    steps:
+      # 检出代码，fetch-depth: 0 确保获取完整提交历史，对同步有必要
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 运行 GitHub-Gitee-Sync 工具
+      - name: Sync to Gitee
+        uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1
+        with:
+          # GitHub 端配置（必填）
+          github-owner: 'Elicy04'
+          github-token: ${{ secrets.GH_TOKEN }}
+          # Gitee 端配置（必填）
+          gitee-owner: 'elicy'
+          gitee-token: ${{ secrets.GITEE_TOKEN }}
+          # 核心配置：白名单指定你的单个仓库
+          include-repos: 'ipo-know'
+          # 同步方向：GitHub -> Gitee
+          direction: 'github2gitee'
+          # 同步附属信息：指定同步 Release
+          sync-extra: 'releases,wiki,labels,milestones,issues'
+          # 可选：干运行模式，首次配置建议设为 true 测试，确认无误后改为 false
+          dry-run: false
