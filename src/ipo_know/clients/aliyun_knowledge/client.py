@@ -901,6 +901,9 @@ class AliyunKnowledgeClient:
         )
         return count
 
+    # GetIndexMonitor API 最大允许 30 天时间范围
+    _INDEX_MONITOR_MAX_SECONDS = 30 * 24 * 3600
+
     async def get_index_monitor(
         self,
         start_timestamp: int,
@@ -915,6 +918,18 @@ class AliyunKnowledgeClient:
         Returns:
             解析后的监控数据 dict, 含存储与 QPS 监控信息.
         """
+        # 防御性截断：API 最大支持 30 天范围
+        span = end_timestamp - start_timestamp
+        if span > self._INDEX_MONITOR_MAX_SECONDS:
+            original_start = start_timestamp
+            start_timestamp = end_timestamp - self._INDEX_MONITOR_MAX_SECONDS
+            logger.warning(
+                '百炼 IndexMonitor 时间范围超限 30 天 '
+                '| 原始 start={} | 截断为 start={} '
+                '| end={}',
+                original_start, start_timestamp, end_timestamp,
+            )
+
         logger.debug(
             '百炼 IndexMonitor 调用 | index_id={} | '
             'start={} | end={}',
@@ -930,6 +945,15 @@ class AliyunKnowledgeClient:
             self.workspace_id,
             request,
         )
+        # 检查 API 业务状态码，非 Success 时记录警告
+        code = getattr(response.body, 'code', None)
+        if code is not None and code != 'Success':
+            message = getattr(response.body, 'message', '')
+            logger.warning(
+                '百炼 IndexMonitor 返回非 Success '
+                '| Code={} | Message={} | index_id={}',
+                code, message, self.index_id,
+            )
         data = response.body.data
         if isinstance(data, str):
             data = json.loads(data)
