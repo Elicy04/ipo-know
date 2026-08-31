@@ -66,7 +66,7 @@ _BILL_COLUMNS = [
 _INSTANCE_BILL_COLUMNS = [
     {'name': 'date', 'label': '日期',
      'field': 'date', 'align': 'left'},
-    {'name': 'product', 'label': '产品',
+    {'name': 'product', 'label': '产品明细',
      'field': 'product', 'align': 'left'},
     {'name': 'instance', 'label': '实例/计费项',
      'field': 'instance', 'align': 'left'},
@@ -105,6 +105,7 @@ class MonitorPanel:
         _run_id: 运行代次号, 防止旧任务渲染.
         _container: 面板根容器.
         _btn_refresh: 刷新按钮.
+        _refresh_spinner: 刷新加载转圈指示器.
         _balance_col: 余额卡片内容容器.
         _monitor_col: 监控卡片内容容器.
         _bill_cycle_select: 消费明细账期下拉.
@@ -133,6 +134,7 @@ class MonitorPanel:
         self._monitor_col: ui.column | None = None
         self._bill_cycle_select: ui.select | None = None
         self._bill_granularity: ui.toggle | None = None
+        self._refresh_spinner: ui.spinner | None = None
         self._bill_summary_row: ui.row | None = None
         self._bill_status_label: ui.label | None = None
         self._instance_table: ui.table | None = None
@@ -179,11 +181,15 @@ class MonitorPanel:
             ui.label('监控面板').classes(
                 'text-lg font-bold',
             )
-            self._btn_refresh = ui.button(
-                '刷新监控数据',
-                on_click=self._on_refresh,
-                icon='refresh',
-            ).classes('w-48')
+            with ui.row().classes('items-center gap-2'):
+                self._btn_refresh = ui.button(
+                    '刷新监控数据',
+                    on_click=self._on_refresh,
+                    icon='refresh',
+                ).classes('w-48')
+                self._refresh_spinner = ui.spinner(
+                    size='md',
+                ).set_visibility(False)
 
             # 两列卡片行: 余额 + 监控
             with ui.row().classes(
@@ -243,6 +249,7 @@ class MonitorPanel:
             self._bill_granularity = ui.toggle(
                 options=_GRANULARITY_OPTIONS,
                 value='MONTHLY',
+                on_change=self._on_granularity_change,
             )
         self._bill_summary_row = ui.row().classes(
             'w-full gap-4 text-sm',
@@ -319,13 +326,16 @@ class MonitorPanel:
                 type='warning',
             )
             return
-        # 段四: 快照消费明细查询参数 (账期/粒度)
+        # 段四: 显示加载指示器
+        if self._refresh_spinner is not None:
+            self._refresh_spinner.set_visibility(True)
+        # 段五: 快照消费明细查询参数 (账期/粒度)
         cycle, granularity = self._snapshot_bill_state()
-        # 段五: 启动后台任务
+        # 段六: 启动后台任务
         self._running = True
         self._run_id += 1
         run_id = self._run_id
-        # 段六: 后台协程
+        # 段七: 后台协程
         background_tasks.create(
             self._run_refresh(
                 platform, run_id, cycle, granularity,
@@ -418,6 +428,8 @@ class MonitorPanel:
             )
         finally:
             self._running = False
+            if self._refresh_spinner is not None:
+                self._refresh_spinner.set_visibility(False)
 
     async def _refresh_instance_bills(
         self,
@@ -606,6 +618,20 @@ class MonitorPanel:
         Returns:
             知识库监控摘要 DTO.
         """
+        if not data:
+            return KbMonitorSummary(
+                platform=platform,  # type: ignore[arg-type]
+                kb_type='未知',
+                storage_limit_gb=0.0,
+                storage_usage_gb=0.0,
+                doc_num=(
+                    doc_count if isinstance(doc_count, int)
+                    else None
+                ),
+                point_num=None,
+                create_time=None,
+                update_time=None,
+            )
         kb_type_raw = data.get(
             'pipelineCommercialType', '',
         )
@@ -614,7 +640,7 @@ class MonitorPanel:
             else '旗舰版' if kb_type_raw == 'enterprise'
             else str(kb_type_raw)
         )
-        storage = data.get('storageMonitorData', {})
+        storage = data.get('storageMonitorData') or {}
         if isinstance(storage, str):
             storage = json.loads(storage)
         limit_gb = float(
@@ -652,6 +678,17 @@ class MonitorPanel:
         Returns:
             知识库监控摘要 DTO.
         """
+        if not data:
+            return KbMonitorSummary(
+                platform=platform,  # type: ignore[arg-type]
+                kb_type='未知',
+                storage_limit_gb=0.0,
+                storage_usage_gb=0.0,
+                doc_num=None,
+                point_num=None,
+                create_time=None,
+                update_time=None,
+            )
         # 知识库规格: version 1=免费版, 2=标准版, 4=旗舰版
         version = data.get('version')
         version_map = {1: '免费版', 2: '标准版', 4: '旗舰版'}
@@ -846,7 +883,7 @@ class MonitorPanel:
                 'date': (
                     item.billing_date or item.billing_cycle
                 ),
-                'product': item.product_name,
+                'product': item.product_detail,
                 'instance': instance,
                 'bill_type': _ITEM_TYPE_LABELS.get(
                     item.item_type, item.item_type,
@@ -893,6 +930,18 @@ class MonitorPanel:
             self._bill_summary_row.clear()
         if self._bill_status_label is not None:
             self._bill_status_label.text = ''
+
+    def _on_granularity_change(self) -> None:
+        """粒度切换回调: 先清空旧数据再触发刷新."""
+        # 清空消费明细表格、汇总条与状态行,
+        # 防止用户看到旧粒度的残留数据.
+        if self._instance_table is not None:
+            self._instance_table.rows = []
+        if self._bill_summary_row is not None:
+            self._bill_summary_row.clear()
+        if self._bill_status_label is not None:
+            self._bill_status_label.text = ''
+        self._on_refresh()
 
     def _refresh_btn_state(self) -> None:
         """根据 _running 状态刷新按钮灰化."""
