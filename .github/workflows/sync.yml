@@ -18,7 +18,7 @@ jobs:
 
       # 运行 GitHub-Gitee-Sync 工具
       - name: Sync to Gitee
-        uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1
+        uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1.0.0
         with:
           # GitHub 端配置（必填）
           github-owner: 'Elicy04'
